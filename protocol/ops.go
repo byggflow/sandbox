@@ -32,6 +32,7 @@ const (
 	OpTemplateSave = "template.save"
 
 	// Session
-	OpSessionResumed  = "session.resumed"
-	OpSessionReplaced = "session.replaced"
+	OpSessionResumed    = "session.resumed"
+	OpSessionReplaced   = "session.replaced"
+	OpSessionNegotiateE2E = "session.negotiate_e2e"
 )
