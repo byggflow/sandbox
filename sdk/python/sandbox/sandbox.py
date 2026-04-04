@@ -143,8 +143,14 @@ async def create_sandbox(opts: Optional[SandboxOptions] = None) -> Sandbox:
     data = response.json()
     sandbox_id: str = data["id"]
 
-    transport = WsTransport()
-    await transport.connect(f"{ws_base}/sandboxes/{sandbox_id}/ws", headers)
+    ws_transport = WsTransport()
+    await ws_transport.connect(f"{ws_base}/sandboxes/{sandbox_id}/ws", headers)
+
+    transport: RpcTransport = ws_transport
+    if opts.encrypted:
+        from .e2e import negotiate_e2e
+
+        transport = await negotiate_e2e(ws_transport)
 
     return Sandbox(sandbox_id, transport)
 
@@ -158,7 +164,13 @@ async def connect_sandbox(
     headers = await resolve_auth(opts.auth)
     _, ws_base = _resolve_endpoints(opts.endpoint)
 
-    transport = WsTransport()
-    await transport.connect(f"{ws_base}/sandboxes/{sandbox_id}/ws", headers)
+    ws_transport = WsTransport()
+    await ws_transport.connect(f"{ws_base}/sandboxes/{sandbox_id}/ws", headers)
+
+    transport: RpcTransport = ws_transport
+    if opts.encrypted:
+        from .e2e import negotiate_e2e
+
+        transport = await negotiate_e2e(ws_transport)
 
     return Sandbox(sandbox_id, transport)
