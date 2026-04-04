@@ -1,0 +1,38 @@
+# sandboxd test configuration
+# Minimal settings for integration testing with small pool sizes.
+
+[server]
+socket = "/var/run/sandboxd/sandboxd.sock"
+tcp = "0.0.0.0:7522"
+data_dir = "/var/lib/sandboxd"
+
+# Single-user mode (no identity header)
+identity_header = ""
+system_identity = "_system"
+
+[limits]
+max_sandboxes = 10
+max_memory = "256m"
+max_cpu = 1.0
+max_ttl = 3600
+max_templates = 10
+max_template_size = "512m"
+template_expiry_days = 0
+
+[network]
+bridge_name = "sandboxd-test-net"
+icc = false
+
+[pool]
+total_warm = 2
+min_per_image = 0
+min_base = 1
+max_warm = 5
+rebalance_window = "1h"
+health_interval = "10s"
+liveness_timeout = "5ms"
+
+[pool.base.default]
+image = "sandbox-test-base:latest"
+memory = "256m"
+cpu = 1.0

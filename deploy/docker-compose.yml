@@ -1,0 +1,14 @@
+services:
+  sandboxd:
+    image: byggflow/sandboxd
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandboxd-sock:/var/run/sandboxd
+      - sandboxd-data:/var/lib/sandboxd
+    environment:
+      - SANDBOXD_LISTEN=/var/run/sandboxd/sandboxd.sock
+      - SANDBOXD_LISTEN_TCP=0.0.0.0:7522
+
+volumes:
+  sandboxd-sock:
+  sandboxd-data:

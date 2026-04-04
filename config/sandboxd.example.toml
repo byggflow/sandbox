@@ -1,0 +1,48 @@
+# sandboxd configuration
+# Supports hot-reload on file change or SIGHUP.
+# Listen addresses (socket, tcp) require a restart.
+
+[server]
+socket = "/var/run/sandboxd/sandboxd.sock"
+tcp = ""                          # empty = disabled, "0.0.0.0:7522" to enable
+data_dir = "/var/lib/sandboxd"
+
+# If set, sandboxd reads this header to scope sandboxes and templates
+# per identity. If empty, all resources are unscoped (single-user mode).
+identity_header = ""
+
+# Identity value treated as system/operator. Templates created by this
+# identity are visible to all. Only relevant in multi-tenant mode.
+system_identity = "_system"
+
+[limits]
+max_sandboxes = 100
+max_memory = "4g"
+max_cpu = 4.0
+max_ttl = 86400                   # 24 hours
+max_templates = 50                # per identity (system exempt)
+max_template_size = "2g"
+template_expiry_days = 60         # unused templates auto-deleted, 0 = never
+
+[network]
+bridge_name = "sandboxd-net"      # dedicated Docker bridge network
+icc = false                       # inter-container communication disabled
+
+[pool]
+total_warm = 30                   # total warm slots across all images
+min_per_image = 0                 # minimum warm slots per tracked image
+min_base = 2                      # minimum warm slots per base image
+max_warm = 60                     # autoscale ceiling for total budget
+rebalance_window = "1h"           # sliding window for frequency tracking
+health_interval = "10s"           # periodic agent health check
+liveness_timeout = "5ms"          # ping timeout on warm pool assignment
+
+[pool.base.default]
+image = "byggflow/sandbox-base:latest"
+memory = "512m"
+cpu = 1.0
+
+[pool.base.python]
+image = "byggflow/sandbox-python:latest"
+memory = "1g"
+cpu = 2.0
