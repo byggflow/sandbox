@@ -29,8 +29,10 @@ type MultiTenantConfig struct {
 
 // ServerConfig holds listener and data directory settings.
 type ServerConfig struct {
-	Socket string `toml:"socket"`
-	TCP    string `toml:"tcp"`
+	Socket  string `toml:"socket"`
+	TCP     string `toml:"tcp"`
+	TLSCert string `toml:"tls_cert"` // Path to TLS certificate file for TCP listener.
+	TLSKey  string `toml:"tls_key"`  // Path to TLS private key file for TCP listener.
 	DataDir string `toml:"data_dir"`
 	NodeID  string `toml:"node_id"` // Short identifier for this node, embedded in sandbox IDs (e.g. "eu1", "us2a").
 }
@@ -163,6 +165,9 @@ func (c *Config) validate() error {
 	}
 	if c.MultiTenant.Enabled && c.MultiTenant.PublicKey == "" {
 		return fmt.Errorf("multi_tenant.public_key is required when multi_tenant.enabled = true")
+	}
+	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
+		return fmt.Errorf("server.tls_cert and server.tls_key must both be set or both be empty")
 	}
 	if c.Limits.MaxSandboxes <= 0 {
 		return fmt.Errorf("limits.max_sandboxes must be positive")

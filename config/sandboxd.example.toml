@@ -5,6 +5,8 @@
 [server]
 socket = "/var/run/sandboxd/sandboxd.sock"
 tcp = ""                          # empty = disabled, "0.0.0.0:7522" to enable
+tls_cert = ""                     # TLS certificate for TCP listener (empty = plaintext)
+tls_key = ""                      # TLS private key for TCP listener
 data_dir = "/var/lib/sandboxd"
 node_id = ""                      # short node tag embedded in sandbox IDs (e.g. "eu1" → sbx-eu1-a3f2c1)
 
@@ -12,12 +14,15 @@ node_id = ""                      # short node tag embedded in sandbox IDs (e.g.
 # /metrics) must carry a valid Ed25519 signature proving the identity and
 # limit headers were set by a trusted proxy.
 #
-# The proxy signs these headers with its private key:
+# The signed payload includes the HTTP method, path, and these headers:
 #   X-Sandbox-Identity:       the caller's identity
 #   X-Sandbox-Max-Concurrent: max concurrent sandboxes for this identity
 #   X-Sandbox-Max-TTL:        max session TTL in seconds
 #   X-Sandbox-Max-Templates:  max templates for this identity
+#   X-Sandbox-Timestamp:      Unix epoch second when the proxy signed the request
 #   X-Sandbox-Signature:      base64 Ed25519 signature over the above
+#
+# Signatures expire after 30 seconds to prevent replay attacks.
 #
 # Generate a keypair:  openssl genpkey -algorithm ed25519 -out proxy.pem
 #                       openssl pkey -in proxy.pem -pubout -outform DER | base64

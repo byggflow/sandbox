@@ -22,20 +22,21 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 	// Tenant-authenticated routes: require valid signature in multi-tenant mode.
 	tenant := d.tenantAuth
 
-	mux.HandleFunc("POST /sandboxes", tenant(d.handleCreateSandbox))
+	mux.HandleFunc("POST /sandboxes", tenant(limitBody(d.handleCreateSandbox)))
 	mux.HandleFunc("GET /sandboxes", tenant(d.handleListSandboxes))
 	mux.HandleFunc("DELETE /sandboxes/{id}", tenant(d.handleDestroySandbox))
 	mux.HandleFunc("GET /sandboxes/{id}/stats", tenant(d.handleSandboxStats))
 	mux.HandleFunc("GET /sandboxes/{id}/ws", tenant(d.handleSandboxWS))
 
-	mux.HandleFunc("POST /templates", tenant(d.handleCreateTemplate))
+	mux.HandleFunc("POST /templates", tenant(limitBody(d.handleCreateTemplate)))
 	mux.HandleFunc("GET /templates", tenant(d.handleListTemplates))
 	mux.HandleFunc("GET /templates/{id}", tenant(d.handleGetTemplate))
 	mux.HandleFunc("DELETE /templates/{id}", tenant(d.handleDeleteTemplate))
 
-	mux.HandleFunc("GET /pools", tenant(d.handlePoolStatus))
-	mux.HandleFunc("PUT /pools/{profile}", tenant(d.handlePoolResize))
-	mux.HandleFunc("POST /pools/{profile}/flush", tenant(d.handlePoolFlush))
+	// Admin routes — pool management. Not tenant-scoped; restricted to Unix socket.
+	mux.HandleFunc("GET /pools", d.socketOnly(d.handlePoolStatus))
+	mux.HandleFunc("PUT /pools/{profile}", d.socketOnly(limitBody(d.handlePoolResize)))
+	mux.HandleFunc("POST /pools/{profile}/flush", d.socketOnly(d.handlePoolFlush))
 
 	mux.HandleFunc("GET /events", tenant(d.handleEvents))
 	mux.HandleFunc("GET /events/history", tenant(d.handleEventsHistory))
@@ -45,23 +46,88 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 	mux.HandleFunc("GET /metrics", d.handleMetrics)
 }
 
+// maxRequestBodySize is the maximum size of a request body (1MB).
+const maxRequestBodySize = 1 << 20
+
+// socketOnly restricts a handler to Unix socket connections only.
+// Requests arriving over TCP are rejected with 403.
+func (d *Daemon) socketOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isUnixSocket(r) {
+			writeError(w, http.StatusForbidden, "admin routes are only accessible via Unix socket")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// isUnixSocket returns true if the request arrived over a Unix domain socket.
+// TCP connections have RemoteAddr in "ip:port" format; Unix socket connections
+// use "@" or an empty string.
+func isUnixSocket(r *http.Request) bool {
+	addr := r.RemoteAddr
+	return addr == "" || addr == "@" || addr[0] == '@'
+}
+
+// limitBody wraps the request body with a size limit to prevent OOM from oversized payloads.
+func limitBody(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		}
+		next(w, r)
+	}
+}
+
 // tenantAuth is middleware that verifies Ed25519 signatures on identity headers
 // when multi-tenant mode is enabled. In single-user mode it's a no-op passthrough.
 func (d *Daemon) tenantAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if d.Verifier != nil {
+			// Rate limit failed auth attempts per IP.
+			ip := remoteIP(r)
+			if d.AuthLimit.isBlocked(ip) {
+				w.Header().Set("Retry-After", "60")
+				writeError(w, http.StatusTooManyRequests, "too many authentication failures")
+				return
+			}
+
 			if err := d.Verifier.Verify(r); err != nil {
+				d.AuthLimit.recordFailure(ip)
 				writeError(w, http.StatusUnauthorized, fmt.Sprintf("signature verification failed: %v", err))
 				return
 			}
 			// In multi-tenant mode, identity is required.
 			if r.Header.Get(identity.Header) == "" {
+				d.AuthLimit.recordFailure(ip)
 				writeError(w, http.StatusUnauthorized, "X-Sandbox-Identity header required")
 				return
 			}
 		}
 		next(w, r)
 	}
+}
+
+// Label limits.
+const (
+	maxLabels     = 64
+	maxLabelKey   = 128
+	maxLabelValue = 256
+)
+
+func validateLabels(labels map[string]string) error {
+	if len(labels) > maxLabels {
+		return fmt.Errorf("too many labels: %d exceeds maximum of %d", len(labels), maxLabels)
+	}
+	for k, v := range labels {
+		if len(k) > maxLabelKey {
+			return fmt.Errorf("label key too long: %d exceeds maximum of %d", len(k), maxLabelKey)
+		}
+		if len(v) > maxLabelValue {
+			return fmt.Errorf("label value too long: %d exceeds maximum of %d", len(v), maxLabelValue)
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +141,11 @@ func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
+	}
+
+	if err := validateLabels(req.Labels); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	sbx, err := d.CreateSandbox(r.Context(), req, id, limits)
@@ -276,8 +347,10 @@ func (d *Daemon) handleSandboxWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upgrade to WebSocket.
+	// Only skip origin check for Unix socket connections; TCP connections
+	// require a valid Origin header to prevent cross-site WebSocket hijacking.
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // Origin check disabled for Unix socket use.
+		InsecureSkipVerify: isUnixSocket(r),
 	})
 	if err != nil {
 		d.Log.Error("websocket upgrade failed", "error", err)
@@ -582,8 +655,12 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Optional identity filter.
+	// In multi-tenant mode, force identity filter to the authenticated identity.
+	// In single-user mode, allow optional filtering.
 	identityFilter := r.URL.Query().Get("identity")
+	if d.Verifier != nil {
+		identityFilter = r.Header.Get(identity.Header)
+	}
 
 	// Subscribe BEFORE replaying history so we don't miss events in the gap.
 	subID, ch := d.Events.Subscribe(64)
@@ -669,7 +746,11 @@ func (d *Daemon) handleEventsHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// In multi-tenant mode, force identity filter to the authenticated identity.
 	identityFilter := r.URL.Query().Get("identity")
+	if d.Verifier != nil {
+		identityFilter = r.Header.Get(identity.Header)
+	}
 
 	events, complete := d.Events.Since(afterID)
 

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -73,15 +74,34 @@ func (s *Server) Start() error {
 		}
 	}()
 
-	// Optionally listen on TCP.
+	// Optionally listen on TCP (with TLS if configured).
 	if addr := s.daemon.Config.Server.TCP; addr != "" {
-		tcpLn, err := net.Listen("tcp", addr)
-		if err != nil {
-			return fmt.Errorf("listen tcp %s: %w", addr, err)
-		}
-		s.tcpLn = tcpLn
+		var tcpLn net.Listener
 
-		s.daemon.Log.Info("listening on tcp", "addr", addr)
+		if s.daemon.Config.Server.TLSCert != "" {
+			cert, err := tls.LoadX509KeyPair(s.daemon.Config.Server.TLSCert, s.daemon.Config.Server.TLSKey)
+			if err != nil {
+				return fmt.Errorf("load TLS keypair: %w", err)
+			}
+			tlsCfg := &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			}
+			tcpLn, err = tls.Listen("tcp", addr, tlsCfg)
+			if err != nil {
+				return fmt.Errorf("listen tls %s: %w", addr, err)
+			}
+			s.daemon.Log.Info("listening on tcp with TLS", "addr", addr)
+		} else {
+			var err error
+			tcpLn, err = net.Listen("tcp", addr)
+			if err != nil {
+				return fmt.Errorf("listen tcp %s: %w", addr, err)
+			}
+			s.daemon.Log.Warn("listening on tcp WITHOUT TLS — use tls_cert/tls_key for encrypted connections", "addr", addr)
+		}
+
+		s.tcpLn = tcpLn
 
 		s.wg.Add(1)
 		go func() {

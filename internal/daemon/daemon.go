@@ -27,7 +27,8 @@ type Daemon struct {
 	Server    *Server
 	Metrics   *Metrics
 	Events    *EventBus
-	Verifier  *identity.Verifier // Non-nil when multi-tenant mode is enabled.
+	Verifier  *identity.Verifier    // Non-nil when multi-tenant mode is enabled.
+	AuthLimit *authRateLimiter      // Rate limiter for failed auth attempts.
 	Log       *slog.Logger
 
 	networkID string
@@ -51,6 +52,7 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		Templates: NewTemplateRegistry(),
 		Metrics:   NewMetrics(),
 		Events:    NewEventBus(0),
+		AuthLimit: newAuthRateLimiter(10, 1*time.Minute),
 		Log:       log,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -149,6 +151,18 @@ func (d *Daemon) Reload(path string) error {
 		d.Log.Warn("listen address changed; restart required for this to take effect")
 	}
 
+	// Update verifier if multi-tenant config changed.
+	if cfg.MultiTenant.Enabled {
+		v, err := identity.NewVerifier(cfg.MultiTenant.PublicKey)
+		if err != nil {
+			return fmt.Errorf("reload multi-tenant verifier: %w", err)
+		}
+		d.Verifier = v
+		d.Log.Info("multi-tenant verifier reloaded")
+	} else {
+		d.Verifier = nil
+	}
+
 	// Update config.
 	d.Config = cfg
 
@@ -171,7 +185,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	}
 
 	// Determine image and resource config.
-	image := req.Image
+	var image string
 	profile := req.Profile
 	memory := int64(0)
 	cpu := 0.0
@@ -208,7 +222,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		// Default to the "default" profile.
 		base, ok := d.Config.Pool.Base["default"]
 		if !ok {
-			return nil, fmt.Errorf("no image specified and no default profile")
+			return nil, fmt.Errorf("no profile specified and no default profile configured")
 		}
 		image = base.Image
 		profile = "default"
@@ -597,7 +611,6 @@ func parseByteSize(s string) (int64, error) {
 
 // CreateRequest is the request body for POST /sandboxes.
 type CreateRequest struct {
-	Image    string            `json:"image"`
 	Profile  string            `json:"profile"`
 	Template string            `json:"template"`
 	Memory   string            `json:"memory"`

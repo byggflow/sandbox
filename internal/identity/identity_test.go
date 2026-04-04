@@ -3,8 +3,11 @@ package identity
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestExtract(t *testing.T) {
@@ -81,6 +84,23 @@ func TestExtractLimits(t *testing.T) {
 		lim := ExtractLimits(req)
 		if lim.MaxConcurrent != 0 {
 			t.Errorf("expected 0 for invalid value, got %d", lim.MaxConcurrent)
+		}
+	})
+
+	t.Run("negative values clamped to zero", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/sandboxes", nil)
+		req.Header.Set(HeaderMaxConcurrent, "-5")
+		req.Header.Set(HeaderMaxTTL, "-100")
+		req.Header.Set(HeaderMaxTemplates, "-1")
+		lim := ExtractLimits(req)
+		if lim.MaxConcurrent != 0 {
+			t.Errorf("expected 0 for negative MaxConcurrent, got %d", lim.MaxConcurrent)
+		}
+		if lim.MaxTTL != 0 {
+			t.Errorf("expected 0 for negative MaxTTL, got %d", lim.MaxTTL)
+		}
+		if lim.MaxTemplates != 0 {
+			t.Errorf("expected 0 for negative MaxTemplates, got %d", lim.MaxTemplates)
 		}
 	})
 }
@@ -236,4 +256,91 @@ func TestSignDeterministic(t *testing.T) {
 	if sig1 != sig2 {
 		t.Error("expected identical signatures for identical headers")
 	}
+}
+
+func TestVerifyExpiredTimestamp(t *testing.T) {
+	pub, priv := generateTestKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	v, _ := NewVerifier(b64)
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+
+	// Sign sets a current timestamp, override it with an old one after signing.
+	sig := Sign(priv, req)
+	req.Header.Set(HeaderSignature, sig)
+
+	// Set timestamp to 60 seconds ago — well past the 30s window.
+	// We need to re-sign with the old timestamp to get a valid signature for the stale payload.
+	req.Header.Set(HeaderTimestamp, strconv.FormatInt(time.Now().Unix()-60, 10))
+	sig = signRaw(priv, req)
+	req.Header.Set(HeaderSignature, sig)
+
+	if err := v.Verify(req); err == nil {
+		t.Error("expected error for expired timestamp")
+	}
+}
+
+func TestVerifyMissingTimestamp(t *testing.T) {
+	pub, priv := generateTestKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	v, _ := NewVerifier(b64)
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+
+	// Manually sign without setting a timestamp.
+	payload := buildSignPayload(req)
+	sig := ed25519.Sign(priv, payload)
+	req.Header.Set(HeaderSignature, base64.StdEncoding.EncodeToString(sig))
+
+	if err := v.Verify(req); err == nil {
+		t.Error("expected error for missing timestamp")
+	}
+}
+
+func TestVerifyTamperedMethod(t *testing.T) {
+	pub, priv := generateTestKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	v, _ := NewVerifier(b64)
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+
+	sig := Sign(priv, req)
+	req.Header.Set(HeaderSignature, sig)
+
+	// Tamper: change method from POST to DELETE.
+	req.Method = "DELETE"
+
+	if err := v.Verify(req); err == nil {
+		t.Error("expected signature verification to fail after method tampering")
+	}
+}
+
+func TestVerifyTamperedPath(t *testing.T) {
+	pub, priv := generateTestKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	v, _ := NewVerifier(b64)
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+
+	sig := Sign(priv, req)
+	req.Header.Set(HeaderSignature, sig)
+
+	// Tamper: change path.
+	req.URL.Path = "/templates"
+
+	if err := v.Verify(req); err == nil {
+		t.Error("expected signature verification to fail after path tampering")
+	}
+}
+
+// signRaw signs the request payload without modifying the timestamp header.
+// Used by tests that need to sign with a pre-set (e.g. expired) timestamp.
+func signRaw(privateKey ed25519.PrivateKey, r *http.Request) string {
+	payload := buildSignPayload(r)
+	sig := ed25519.Sign(privateKey, payload)
+	return base64.StdEncoding.EncodeToString(sig)
 }
