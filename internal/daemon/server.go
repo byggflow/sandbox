@@ -24,8 +24,8 @@ func NewServer(d *Daemon) *Server {
 	mux := http.NewServeMux()
 	registerRoutes(mux, d)
 
-	// Add logging middleware.
-	handler := logMiddleware(d, mux)
+	// Add metrics and logging middleware.
+	handler := logMiddleware(d, metricsMiddleware(d.Metrics, mux))
 
 	return &Server{
 		daemon: d,

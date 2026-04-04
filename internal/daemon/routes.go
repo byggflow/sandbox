@@ -30,6 +30,7 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 	mux.HandleFunc("POST /pools/{profile}/flush", d.handlePoolFlush)
 
 	mux.HandleFunc("GET /health", d.handleHealth)
+	mux.HandleFunc("GET /metrics", d.handleMetrics)
 }
 
 func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
