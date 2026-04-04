@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 
+	"github.com/byggflow/sandbox/internal/identity"
 	"github.com/byggflow/sandbox/internal/proxy"
 	"github.com/byggflow/sandbox/protocol"
 	"nhooyr.io/websocket"
@@ -41,12 +42,8 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 }
 
 func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
-	// Extract identity.
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
+	limits := identity.ExtractLimits(r)
 
 	var req CreateRequest
 	if r.Body != nil {
@@ -57,7 +54,7 @@ func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sbx, err := d.CreateSandbox(r.Context(), req, id)
+	sbx, err := d.CreateSandbox(r.Context(), req, id, limits)
 	if err != nil {
 		if err == ErrAtCapacity {
 			w.Header().Set("Retry-After", "2")
@@ -77,11 +74,7 @@ func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
 
 	// Parse label filters from query parameters.
 	// Format: ?label=key:value — multiple label params act as AND filter.
@@ -124,11 +117,7 @@ func (d *Daemon) handleDestroySandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
 
 	sbx, ok := d.Registry.Get(sbxID)
 	if !ok {
@@ -137,7 +126,7 @@ func (d *Daemon) handleDestroySandbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check identity match.
-	if d.Identity.Required() && !sbx.Identity.Matches(id) {
+	if !id.Empty() && !sbx.Identity.Matches(id) {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
@@ -169,11 +158,7 @@ func (d *Daemon) handleSandboxStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
 
 	sbx, ok := d.Registry.Get(sbxID)
 	if !ok {
@@ -181,7 +166,7 @@ func (d *Daemon) handleSandboxStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d.Identity.Required() && !sbx.Identity.Matches(id) {
+	if !id.Empty() && !sbx.Identity.Matches(id) {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
@@ -254,11 +239,7 @@ func (d *Daemon) handleSandboxWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
 
 	sbx, ok := d.Registry.Get(sbxID)
 	if !ok {
@@ -266,7 +247,7 @@ func (d *Daemon) handleSandboxWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d.Identity.Required() && !sbx.Identity.Matches(id) {
+	if !id.Empty() && !sbx.Identity.Matches(id) {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
@@ -363,11 +344,8 @@ func (d *Daemon) handleSandboxWS(w http.ResponseWriter, r *http.Request) {
 // Template routes
 
 func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
+	limits := identity.ExtractLimits(r)
 
 	var req CreateTemplateRequest
 	if r.Body != nil {
@@ -383,10 +361,19 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check template limit.
+	// Check global template limit.
 	if d.Templates.Count() >= d.Config.Limits.MaxTemplates {
 		writeError(w, http.StatusServiceUnavailable, "template limit reached")
 		return
+	}
+
+	// Check per-identity template limit (from proxy header).
+	if limits.MaxTemplates > 0 && !id.Empty() {
+		if d.Templates.CountByIdentity(id.Value) >= limits.MaxTemplates {
+			w.Header().Set("Retry-After", "2")
+			writeError(w, http.StatusTooManyRequests, "identity template quota exceeded")
+			return
+		}
 	}
 
 	// Find the sandbox.
@@ -396,7 +383,7 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d.Identity.Required() && !sbx.Identity.Matches(id) {
+	if !id.Empty() && !sbx.Identity.Matches(id) {
 		writeError(w, http.StatusNotFound, "sandbox not found")
 		return
 	}
@@ -458,11 +445,7 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleListTemplates(w http.ResponseWriter, r *http.Request) {
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
 
 	templates := d.Templates.List(id)
 	if templates == nil {
@@ -478,11 +461,7 @@ func (d *Daemon) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
 
 	tpl, ok := d.Templates.Get(tplID)
 	if !ok {
@@ -490,7 +469,7 @@ func (d *Daemon) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d.Identity.Required() && tpl.Identity != id.Value {
+	if !id.Empty() && tpl.Identity != id.Value {
 		writeError(w, http.StatusNotFound, "template not found")
 		return
 	}
@@ -505,11 +484,7 @@ func (d *Daemon) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := d.Identity.Extract(r)
-	if d.Identity.Required() && id.Empty() {
-		writeError(w, http.StatusUnauthorized, "identity required")
-		return
-	}
+	id := identity.Extract(r)
 
 	tpl, ok := d.Templates.Get(tplID)
 	if !ok {
@@ -517,7 +492,7 @@ func (d *Daemon) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d.Identity.Required() && tpl.Identity != id.Value {
+	if !id.Empty() && tpl.Identity != id.Value {
 		writeError(w, http.StatusNotFound, "template not found")
 		return
 	}

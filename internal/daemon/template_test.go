@@ -149,3 +149,28 @@ func TestTemplateRegistryCount(t *testing.T) {
 		t.Errorf("expected 2, got %d", reg.Count())
 	}
 }
+
+func TestTemplateRegistryCountByIdentity(t *testing.T) {
+	reg := NewTemplateRegistry()
+
+	reg.Add(&Template{ID: "tpl-1", Identity: "alice"})
+	reg.Add(&Template{ID: "tpl-2", Identity: "alice"})
+	reg.Add(&Template{ID: "tpl-3", Identity: "bob"})
+	reg.Add(&Template{ID: "tpl-4", Identity: ""})
+
+	if got := reg.CountByIdentity("alice"); got != 2 {
+		t.Errorf("alice: expected 2, got %d", got)
+	}
+	if got := reg.CountByIdentity("bob"); got != 1 {
+		t.Errorf("bob: expected 1, got %d", got)
+	}
+	if got := reg.CountByIdentity("nobody"); got != 0 {
+		t.Errorf("nobody: expected 0, got %d", got)
+	}
+
+	// Remove one and recheck.
+	reg.Remove("tpl-1")
+	if got := reg.CountByIdentity("alice"); got != 1 {
+		t.Errorf("after remove: alice expected 1, got %d", got)
+	}
+}

@@ -24,7 +24,6 @@ type Daemon struct {
 	Pool      *pool.Manager
 	Registry  *Registry
 	Templates *TemplateRegistry
-	Identity  *identity.Extractor
 	Server    *Server
 	Metrics   *Metrics
 	Events    *EventBus
@@ -49,11 +48,7 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		Docker:    docker,
 		Registry:  NewRegistry(),
 		Templates: NewTemplateRegistry(),
-		Identity: &identity.Extractor{
-			Header:         cfg.Server.IdentityHeader,
-			SystemIdentity: cfg.Server.SystemIdentity,
-		},
-		Metrics: NewMetrics(),
+		Metrics:   NewMetrics(),
 		Events:  NewEventBus(0),
 		Log:     log,
 		ctx:     ctx,
@@ -144,10 +139,6 @@ func (d *Daemon) Reload(path string) error {
 		d.Log.Warn("listen address changed; restart required for this to take effect")
 	}
 
-	// Update identity extractor.
-	d.Identity.Header = cfg.Server.IdentityHeader
-	d.Identity.SystemIdentity = cfg.Server.SystemIdentity
-
 	// Update config.
 	d.Config = cfg
 
@@ -156,15 +147,15 @@ func (d *Daemon) Reload(path string) error {
 }
 
 // CreateSandbox creates a new sandbox from the given parameters.
-func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identity.Identity) (*Sandbox, error) {
-	// Check sandbox limit.
+func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identity.Identity, limits identity.RequestLimits) (*Sandbox, error) {
+	// Check global sandbox limit.
 	if d.Registry.Count() >= d.Config.Limits.MaxSandboxes {
 		return nil, ErrAtCapacity
 	}
 
-	// Check per-identity sandbox limit.
-	if d.Config.Limits.MaxSandboxesPerIdentity > 0 && !id.Empty() {
-		if d.Registry.CountByIdentity(id.Value) >= d.Config.Limits.MaxSandboxesPerIdentity {
+	// Check per-identity sandbox limit (from proxy header).
+	if limits.MaxConcurrent > 0 && !id.Empty() {
+		if d.Registry.CountByIdentity(id.Value) >= limits.MaxConcurrent {
 			return nil, ErrIdentityQuotaExceeded
 		}
 	}
@@ -233,8 +224,11 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		cpu = req.CPU
 	}
 
-	// Validate TTL.
+	// Validate TTL: clamp to per-request limit, then to global limit.
 	ttl := req.TTL
+	if limits.MaxTTL > 0 && ttl > limits.MaxTTL {
+		ttl = limits.MaxTTL
+	}
 	if ttl > d.Config.Limits.MaxTTL {
 		ttl = d.Config.Limits.MaxTTL
 	}

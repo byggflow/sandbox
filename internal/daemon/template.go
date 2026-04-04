@@ -80,6 +80,20 @@ func (r *TemplateRegistry) List(id identity.Identity) []*Template {
 	return result
 }
 
+// CountByIdentity returns the number of templates belonging to the given identity.
+func (r *TemplateRegistry) CountByIdentity(ident string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	count := 0
+	for _, tpl := range r.templates {
+		if tpl.Identity == ident {
+			count++
+		}
+	}
+	return count
+}
+
 // Count returns the total number of registered templates.
 func (r *TemplateRegistry) Count() int {
 	r.mu.RLock()
