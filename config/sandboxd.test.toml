@@ -6,13 +6,8 @@ socket = "/var/run/sandboxd/sandboxd.sock"
 tcp = "0.0.0.0:7522"
 data_dir = "/var/lib/sandboxd"
 
-# Single-user mode (no identity header)
-identity_header = ""
-system_identity = "_system"
-
 [limits]
 max_sandboxes = 10
-max_sandboxes_per_identity = 5
 max_memory = "256m"
 max_cpu = 1.0
 max_ttl = 3600

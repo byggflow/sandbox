@@ -8,21 +8,23 @@ tcp = ""                          # empty = disabled, "0.0.0.0:7522" to enable
 data_dir = "/var/lib/sandboxd"
 node_id = ""                      # short node tag embedded in sandbox IDs (e.g. "eu1" → sbx-eu1-a3f2c1)
 
-# If set, sandboxd reads this header to scope sandboxes and templates
-# per identity. If empty, all resources are unscoped (single-user mode).
-identity_header = ""
-
-# Identity value treated as system/operator. Templates created by this
-# identity are visible to all. Only relevant in multi-tenant mode.
-system_identity = "_system"
+# Multi-tenant mode is activated automatically when requests include the
+# X-Sandbox-Identity header (typically set by a proxy). Per-identity limits
+# are set via request headers, not config:
+#
+#   X-Sandbox-Identity:      the caller's identity
+#   X-Sandbox-Max-Concurrent: max concurrent sandboxes for this identity
+#   X-Sandbox-Max-TTL:        max session TTL in seconds for this identity
+#   X-Sandbox-Max-Templates:  max templates for this identity
+#
+# Global config limits below act as hard ceilings that headers cannot exceed.
 
 [limits]
 max_sandboxes = 100
-max_sandboxes_per_identity = 20  # per identity, 0 = unlimited
 max_memory = "4g"
 max_cpu = 4.0
 max_ttl = 86400                   # 24 hours
-max_templates = 50                # per identity (system exempt)
+max_templates = 50
 max_template_size = "2g"
 template_expiry_days = 60         # unused templates auto-deleted, 0 = never
 

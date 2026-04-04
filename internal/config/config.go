@@ -20,18 +20,15 @@ type Config struct {
 
 // ServerConfig holds listener and data directory settings.
 type ServerConfig struct {
-	Socket         string `toml:"socket"`
-	TCP            string `toml:"tcp"`
-	DataDir        string `toml:"data_dir"`
-	IdentityHeader string `toml:"identity_header"`
-	SystemIdentity string `toml:"system_identity"`
-	NodeID         string `toml:"node_id"`  // Short identifier for this node, embedded in sandbox IDs (e.g. "eu1", "us2a").
+	Socket string `toml:"socket"`
+	TCP    string `toml:"tcp"`
+	DataDir string `toml:"data_dir"`
+	NodeID  string `toml:"node_id"` // Short identifier for this node, embedded in sandbox IDs (e.g. "eu1", "us2a").
 }
 
 // LimitsConfig holds resource limit settings.
 type LimitsConfig struct {
 	MaxSandboxes            int     `toml:"max_sandboxes"`
-	MaxSandboxesPerIdentity int     `toml:"max_sandboxes_per_identity"`
 	MaxMemory               string  `toml:"max_memory"`
 	MaxCPU                  float64 `toml:"max_cpu"`
 	MaxTTL                  int     `toml:"max_ttl"`
@@ -94,16 +91,13 @@ func (b *BaseImageConfig) MemoryBytes() (int64, error) {
 func Defaults() Config {
 	return Config{
 		Server: ServerConfig{
-			Socket:         "/var/run/sandboxd/sandboxd.sock",
-			TCP:            "",
-			DataDir:        "/var/lib/sandboxd",
-			IdentityHeader: "",
-			SystemIdentity: "_system",
+			Socket:  "/var/run/sandboxd/sandboxd.sock",
+			TCP:     "",
+			DataDir: "/var/lib/sandboxd",
 		},
 		Limits: LimitsConfig{
-			MaxSandboxes:            100,
-			MaxSandboxesPerIdentity: 20,
-			MaxMemory:               "4g",
+			MaxSandboxes:       100,
+			MaxMemory:          "4g",
 			MaxCPU:                  4.0,
 			MaxTTL:                  86400,
 			MaxTemplates:            50,

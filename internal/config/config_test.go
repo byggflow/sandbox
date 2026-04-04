@@ -35,9 +35,6 @@ func TestLoad(t *testing.T) {
 socket = "/tmp/test.sock"
 tcp = "0.0.0.0:7522"
 data_dir = "/tmp/sandboxd"
-identity_header = "X-Identity"
-system_identity = "admin"
-
 [limits]
 max_sandboxes = 50
 max_memory = "2g"
@@ -84,9 +81,6 @@ cpu = 2.0
 	}
 	if cfg.Server.TCP != "0.0.0.0:7522" {
 		t.Errorf("unexpected tcp: %s", cfg.Server.TCP)
-	}
-	if cfg.Server.IdentityHeader != "X-Identity" {
-		t.Errorf("unexpected identity_header: %s", cfg.Server.IdentityHeader)
 	}
 	if cfg.Limits.MaxSandboxes != 50 {
 		t.Errorf("unexpected max_sandboxes: %d", cfg.Limits.MaxSandboxes)
