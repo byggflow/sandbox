@@ -204,6 +204,39 @@ func TestEventBusSinceAll(t *testing.T) {
 	}
 }
 
+func TestEventBusMaxSubscribers(t *testing.T) {
+	bus := NewEventBus(0)
+
+	// Fill up to max subscribers.
+	ids := make([]string, 0, maxSubscribers)
+	for i := 0; i < maxSubscribers; i++ {
+		id, ch := bus.Subscribe(1)
+		if ch == nil {
+			t.Fatalf("subscribe %d: expected channel, got nil", i)
+		}
+		ids = append(ids, id)
+	}
+
+	// Next subscribe should be rejected.
+	id, ch := bus.Subscribe(1)
+	if ch != nil || id != "" {
+		t.Fatal("expected nil channel when subscriber limit reached")
+	}
+
+	// Unsubscribe one and try again — should succeed.
+	bus.Unsubscribe(ids[0])
+	id, ch = bus.Subscribe(1)
+	if ch == nil {
+		t.Fatal("expected channel after freeing a slot")
+	}
+	bus.Unsubscribe(id)
+
+	// Cleanup.
+	for _, id := range ids[1:] {
+		bus.Unsubscribe(id)
+	}
+}
+
 func TestEventBusSinceGap(t *testing.T) {
 	// Small ring buffer — only holds 3 events.
 	bus := NewEventBus(3)

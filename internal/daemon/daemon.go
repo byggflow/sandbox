@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/byggflow/sandbox/internal/config"
@@ -27,8 +28,9 @@ type Daemon struct {
 	Server    *Server
 	Metrics   *Metrics
 	Events    *EventBus
-	Verifier  *identity.Verifier    // Non-nil when multi-tenant mode is enabled.
-	AuthLimit *authRateLimiter      // Rate limiter for failed auth attempts.
+	verifier  atomic.Pointer[identity.Verifier] // Non-nil when multi-tenant mode is enabled.
+	AuthLimit   *rateLimiter                    // Rate limiter for failed auth attempts.
+	CreateLimit *rateLimiter                    // Rate limiter for sandbox creation per identity.
 	Log       *slog.Logger
 
 	networkID string
@@ -52,7 +54,8 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		Templates: NewTemplateRegistry(),
 		Metrics:   NewMetrics(),
 		Events:    NewEventBus(0),
-		AuthLimit: newAuthRateLimiter(10, 1*time.Minute),
+		AuthLimit:   newRateLimiter(10, 1*time.Minute),
+		CreateLimit: newRateLimiter(20, 1*time.Minute),
 		Log:       log,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -64,11 +67,16 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		if err != nil {
 			return nil, fmt.Errorf("multi-tenant verifier: %w", err)
 		}
-		d.Verifier = v
+		d.verifier.Store(v)
 		log.Info("multi-tenant mode enabled with Ed25519 signature verification", "keys", v.KeyCount())
 	}
 
 	return d, nil
+}
+
+// Verifier returns the current multi-tenant verifier, or nil if disabled.
+func (d *Daemon) Verifier() *identity.Verifier {
+	return d.verifier.Load()
 }
 
 // Start initializes the daemon: ensures the Docker network exists,
@@ -159,10 +167,10 @@ func (d *Daemon) Reload(path string) error {
 		if err != nil {
 			return fmt.Errorf("reload multi-tenant verifier: %w", err)
 		}
-		d.Verifier = v
+		d.verifier.Store(v)
 		d.Log.Info("multi-tenant verifier reloaded", "keys", v.KeyCount())
 	} else {
-		d.Verifier = nil
+		d.verifier.Store(nil)
 	}
 
 	// Update config.

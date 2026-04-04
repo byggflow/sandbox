@@ -60,7 +60,8 @@ func (s *Server) Start() error {
 
 	// Set socket permissions.
 	if err := os.Chmod(socketPath, 0660); err != nil {
-		s.daemon.Log.Warn("failed to set socket permissions", "error", err)
+		unixLn.Close()
+		return fmt.Errorf("set socket permissions on %s: %w", socketPath, err)
 	}
 
 	s.daemon.Log.Info("listening on unix socket", "path", socketPath)

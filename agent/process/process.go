@@ -300,12 +300,30 @@ func streamOutput(conn Conn, pid int, method string, r io.Reader) {
 	}
 }
 
-// safeBuffer is a simple bytes.Buffer replacement for capturing output.
+// maxOutputSize is the maximum bytes captured from stdout/stderr in exec.
+const maxOutputSize = 50 * 1024 * 1024 // 50MB
+
+// safeBuffer is a simple bytes.Buffer replacement for capturing output
+// with a size cap to prevent memory exhaustion.
 type safeBuffer struct {
-	data []byte
+	data      []byte
+	truncated bool
 }
 
 func (b *safeBuffer) Write(p []byte) (int, error) {
+	if b.truncated {
+		return len(p), nil // Discard but report success so the process continues.
+	}
+	remaining := maxOutputSize - len(b.data)
+	if remaining <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		b.data = append(b.data, p[:remaining]...)
+		b.truncated = true
+		return len(p), nil
+	}
 	b.data = append(b.data, p...)
 	return len(p), nil
 }

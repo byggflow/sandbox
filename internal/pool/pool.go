@@ -200,24 +200,30 @@ func (m *Manager) Resize(ctx context.Context, profile string, count int) error {
 		return fmt.Errorf("parse memory: %w", err)
 	}
 
+	// Scale up: create containers until we reach the desired count.
+	// Re-check count under lock after each creation to avoid overallocation.
+	for {
+		m.mu.Lock()
+		current := len(m.warm[base.Image])
+		if current >= count {
+			m.mu.Unlock()
+			break
+		}
+		m.mu.Unlock()
+
+		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU)
+		if err != nil {
+			return fmt.Errorf("create warm container: %w", err)
+		}
+		m.mu.Lock()
+		m.warm[base.Image] = append(m.warm[base.Image], wc)
+		m.mu.Unlock()
+	}
+
+	// Scale down: remove excess containers.
 	m.mu.Lock()
 	current := len(m.warm[base.Image])
-	m.mu.Unlock()
-
-	if count > current {
-		// Scale up.
-		for i := current; i < count; i++ {
-			wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU)
-			if err != nil {
-				return fmt.Errorf("create warm container: %w", err)
-			}
-			m.mu.Lock()
-			m.warm[base.Image] = append(m.warm[base.Image], wc)
-			m.mu.Unlock()
-		}
-	} else if count < current {
-		// Scale down: remove excess containers.
-		m.mu.Lock()
+	if count < current {
 		containers := m.warm[base.Image]
 		excess := containers[count:]
 		m.warm[base.Image] = containers[:count]
@@ -229,6 +235,8 @@ func (m *Manager) Resize(ctx context.Context, profile string, count int) error {
 			}
 			_ = m.docker.ContainerRemove(ctx, wc.ContainerID, container.RemoveOptions{Force: true})
 		}
+	} else {
+		m.mu.Unlock()
 	}
 
 	return nil

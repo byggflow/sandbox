@@ -46,10 +46,17 @@ func NewEventBus(capacity int) *EventBus {
 	}
 }
 
+const maxSubscribers = 100
+
 // Subscribe registers a new subscriber and returns a unique ID and a read-only channel.
+// Returns "", nil if the maximum subscriber count has been reached.
 func (eb *EventBus) Subscribe(bufferSize int) (string, <-chan Event) {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
+
+	if len(eb.subscribers) >= maxSubscribers {
+		return "", nil
+	}
 
 	id := generateSubscriberID()
 	ch := make(chan Event, bufferSize)

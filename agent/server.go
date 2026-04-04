@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -189,7 +190,7 @@ func (s *Server) authenticateConn(conn net.Conn) bool {
 		Token string `json:"token"`
 	}
 	raw, _ := json.Marshal(req.Params)
-	if err := json.Unmarshal(raw, &params); err != nil || params.Token != s.authToken {
+	if err := json.Unmarshal(raw, &params); err != nil || subtle.ConstantTimeCompare([]byte(params.Token), []byte(s.authToken)) != 1 {
 		log.Printf("auth: invalid token from %s", conn.RemoteAddr())
 		s.sendAuthError(conn, req.ID, "invalid token")
 		return false

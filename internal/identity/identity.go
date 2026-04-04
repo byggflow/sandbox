@@ -4,7 +4,6 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -147,7 +146,12 @@ func (v *Verifier) Verify(r *http.Request) error {
 	if err != nil {
 		return fmt.Errorf("invalid timestamp: %w", err)
 	}
-	age := time.Duration(math.Abs(float64(time.Now().Unix()-ts))) * time.Second
+	now := time.Now().Unix()
+	diff := now - ts
+	if diff < 0 {
+		diff = -diff
+	}
+	age := time.Duration(diff) * time.Second
 	if age > MaxSignatureAge {
 		return fmt.Errorf("signature expired: age %s exceeds %s", age, MaxSignatureAge)
 	}

@@ -83,7 +83,7 @@ func limitBody(next http.HandlerFunc) http.HandlerFunc {
 // when multi-tenant mode is enabled. In single-user mode it's a no-op passthrough.
 func (d *Daemon) tenantAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if d.Verifier != nil {
+		if v := d.Verifier(); v != nil {
 			// Rate limit failed auth attempts per IP.
 			ip := remoteIP(r)
 			if d.AuthLimit.isBlocked(ip) {
@@ -92,14 +92,15 @@ func (d *Daemon) tenantAuth(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 
-			if err := d.Verifier.Verify(r); err != nil {
-				d.AuthLimit.recordFailure(ip)
-				writeError(w, http.StatusUnauthorized, fmt.Sprintf("signature verification failed: %v", err))
+			if err := v.Verify(r); err != nil {
+				d.AuthLimit.record(ip)
+				d.Log.Warn("signature verification failed", "ip", ip, "error", err)
+				writeError(w, http.StatusUnauthorized, "authentication failed")
 				return
 			}
 			// In multi-tenant mode, identity is required.
 			if r.Header.Get(identity.Header) == "" {
-				d.AuthLimit.recordFailure(ip)
+				d.AuthLimit.record(ip)
 				writeError(w, http.StatusUnauthorized, "X-Sandbox-Identity header required")
 				return
 			}
@@ -133,6 +134,18 @@ func validateLabels(labels map[string]string) error {
 func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	id := identity.Extract(r)
 	limits := identity.ExtractLimits(r)
+
+	// Per-identity rate limit on sandbox creation.
+	rateKey := id.Value
+	if rateKey == "" {
+		rateKey = remoteIP(r)
+	}
+	if d.CreateLimit.isBlocked(rateKey) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "sandbox creation rate limit exceeded")
+		return
+	}
+	d.CreateLimit.record(rateKey)
 
 	var req CreateRequest
 	if r.Body != nil {
@@ -658,12 +671,16 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// In multi-tenant mode, force identity filter to the authenticated identity.
 	// In single-user mode, allow optional filtering.
 	identityFilter := r.URL.Query().Get("identity")
-	if d.Verifier != nil {
+	if d.Verifier() != nil {
 		identityFilter = r.Header.Get(identity.Header)
 	}
 
 	// Subscribe BEFORE replaying history so we don't miss events in the gap.
 	subID, ch := d.Events.Subscribe(64)
+	if ch == nil {
+		writeError(w, http.StatusServiceUnavailable, "too many event subscribers")
+		return
+	}
 	defer d.Events.Unsubscribe(subID)
 
 	// Set SSE headers.
@@ -748,7 +765,7 @@ func (d *Daemon) handleEventsHistory(w http.ResponseWriter, r *http.Request) {
 
 	// In multi-tenant mode, force identity filter to the authenticated identity.
 	identityFilter := r.URL.Query().Get("identity")
-	if d.Verifier != nil {
+	if d.Verifier() != nil {
 		identityFilter = r.Header.Get(identity.Header)
 	}
 

@@ -7,10 +7,12 @@ import (
 	"time"
 )
 
-// authRateLimiter tracks failed authentication attempts per IP address.
+const maxRateLimitEntries = 10_000
+
+// rateLimiter tracks request counts per key (IP or identity).
 // It uses a simple counter with a decay window — after the window elapses
-// without new failures, the counter resets.
-type authRateLimiter struct {
+// without new requests, the counter resets.
+type rateLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*rateLimitEntry
 	max     int           // Max failures before blocking.
@@ -22,20 +24,36 @@ type rateLimitEntry struct {
 	lastAt time.Time
 }
 
-func newAuthRateLimiter(maxFailures int, window time.Duration) *authRateLimiter {
-	rl := &authRateLimiter{
+func newRateLimiter(max int, window time.Duration) *rateLimiter {
+	rl := &rateLimiter{
 		entries: make(map[string]*rateLimitEntry),
-		max:     maxFailures,
+		max:     max,
 		window:  window,
 	}
 	go rl.cleanup()
 	return rl
 }
 
-// recordFailure increments the failure counter for an IP.
-func (rl *authRateLimiter) recordFailure(ip string) {
+// record increments the failure counter for an IP.
+func (rl *rateLimiter) record(ip string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+
+	// Evict oldest entry if map is at capacity.
+	if len(rl.entries) >= maxRateLimitEntries {
+		var oldestIP string
+		var oldestTime time.Time
+		for ip, e := range rl.entries {
+			if oldestIP == "" || e.lastAt.Before(oldestTime) {
+				oldestIP = ip
+				oldestTime = e.lastAt
+			}
+		}
+		if oldestIP != "" {
+			delete(rl.entries, oldestIP)
+		}
+	}
+
 	e, ok := rl.entries[ip]
 	if !ok || time.Since(e.lastAt) > rl.window {
 		rl.entries[ip] = &rateLimitEntry{count: 1, lastAt: time.Now()}
@@ -46,7 +64,7 @@ func (rl *authRateLimiter) recordFailure(ip string) {
 }
 
 // isBlocked returns true if the IP has exceeded the failure limit within the window.
-func (rl *authRateLimiter) isBlocked(ip string) bool {
+func (rl *rateLimiter) isBlocked(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	e, ok := rl.entries[ip]
@@ -61,7 +79,7 @@ func (rl *authRateLimiter) isBlocked(ip string) bool {
 }
 
 // cleanup periodically removes stale entries.
-func (rl *authRateLimiter) cleanup() {
+func (rl *rateLimiter) cleanup() {
 	ticker := time.NewTicker(rl.window)
 	defer ticker.Stop()
 	for range ticker.C {

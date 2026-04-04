@@ -100,6 +100,70 @@ func TestExecEmptyCommand(t *testing.T) {
 	}
 }
 
+func TestSafeBufferTruncation(t *testing.T) {
+	buf := &safeBuffer{}
+
+	// Write exactly maxOutputSize bytes.
+	chunk := make([]byte, 1024)
+	for i := range chunk {
+		chunk[i] = 'A'
+	}
+
+	writes := maxOutputSize / len(chunk)
+	for i := 0; i < writes; i++ {
+		n, err := buf.Write(chunk)
+		if err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		if n != len(chunk) {
+			t.Fatalf("write %d: n=%d, want %d", i, n, len(chunk))
+		}
+	}
+
+	if len(buf.Bytes()) != maxOutputSize {
+		t.Fatalf("buffer size = %d, want %d", len(buf.Bytes()), maxOutputSize)
+	}
+
+	// Next write should be accepted (returns len(p)) but data is truncated.
+	n, err := buf.Write(chunk)
+	if err != nil {
+		t.Fatalf("overflow write: %v", err)
+	}
+	if n != len(chunk) {
+		t.Fatalf("overflow write: n=%d, want %d", n, len(chunk))
+	}
+
+	// Buffer should not have grown beyond maxOutputSize.
+	if len(buf.Bytes()) != maxOutputSize {
+		t.Fatalf("buffer grew past max: %d", len(buf.Bytes()))
+	}
+	if !buf.truncated {
+		t.Fatal("expected truncated flag to be set")
+	}
+}
+
+func TestSafeBufferPartialTruncation(t *testing.T) {
+	buf := &safeBuffer{}
+
+	// Fill to almost full.
+	almostFull := make([]byte, maxOutputSize-100)
+	buf.Write(almostFull)
+
+	// Write 200 bytes — only first 100 should be kept.
+	overflow := make([]byte, 200)
+	for i := range overflow {
+		overflow[i] = 'B'
+	}
+	buf.Write(overflow)
+
+	if len(buf.Bytes()) != maxOutputSize {
+		t.Fatalf("buffer size = %d, want %d", len(buf.Bytes()), maxOutputSize)
+	}
+	if !buf.truncated {
+		t.Fatal("expected truncated flag")
+	}
+}
+
 // safeWriter is a thread-safe writer for testing spawn output.
 type safeWriter struct {
 	mu  sync.Mutex
