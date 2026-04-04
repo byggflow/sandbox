@@ -42,7 +42,6 @@ template_expiry_days = 60         # unused templates auto-deleted, 0 = never
 
 [network]
 bridge_name = "sandboxd-net"      # dedicated Docker bridge network
-icc = false                       # inter-container communication disabled
 
 [pool]
 total_warm = 30                   # total warm slots across all images

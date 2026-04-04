@@ -17,7 +17,6 @@ template_expiry_days = 0
 
 [network]
 bridge_name = "sandboxd-test-net"
-icc = false
 
 [pool]
 total_warm = 2

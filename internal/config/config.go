@@ -57,7 +57,6 @@ type LimitsConfig struct {
 // NetworkConfig holds Docker network settings.
 type NetworkConfig struct {
 	BridgeName string `toml:"bridge_name"`
-	ICC        bool   `toml:"icc"`
 }
 
 // PoolConfig holds warm pool settings.
@@ -123,7 +122,6 @@ func Defaults() Config {
 		},
 		Network: NetworkConfig{
 			BridgeName: "sandboxd-net",
-			ICC:        false,
 		},
 		Pool: PoolConfig{
 			TotalWarm:       30,

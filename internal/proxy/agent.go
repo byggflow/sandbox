@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -102,6 +103,48 @@ func (a *AgentConn) Ping(timeout time.Duration) error {
 
 	if frameType != protocol.FramePing || len(payload) == 0 || payload[0] != protocol.PingResponse {
 		return fmt.Errorf("unexpected response: type=0x%02x", frameType)
+	}
+
+	return nil
+}
+
+// Authenticate sends an auth.token RPC to the agent and verifies the response.
+// Must be called before any other RPC when the agent requires a token.
+func (a *AgentConn) Authenticate(token string, timeout time.Duration) error {
+	if err := a.conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("set auth deadline: %w", err)
+	}
+	defer a.conn.SetDeadline(time.Time{})
+
+	req := protocol.Request{
+		JSONRPC: "2.0",
+		ID:      0,
+		Method:  "auth.token",
+		Params:  map[string]string{"token": token},
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal auth request: %w", err)
+	}
+
+	if err := a.WriteFrame(protocol.FrameJSON, payload); err != nil {
+		return fmt.Errorf("send auth request: %w", err)
+	}
+
+	frameType, respPayload, err := a.ReadFrame()
+	if err != nil {
+		return fmt.Errorf("read auth response: %w", err)
+	}
+	if frameType != protocol.FrameJSON {
+		return fmt.Errorf("unexpected auth response frame type: 0x%02x", frameType)
+	}
+
+	var resp protocol.Response
+	if err := json.Unmarshal(respPayload, &resp); err != nil {
+		return fmt.Errorf("decode auth response: %w", err)
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("agent auth failed: %s", resp.Error.Message)
 	}
 
 	return nil

@@ -259,8 +259,12 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		ttl = d.Config.Limits.MaxTTL
 	}
 
-	// Generate ID.
+	// Generate ID and auth token.
 	sbxID, err := GenerateID(d.Config.Server.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	authToken, err := GenerateAuthToken()
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +284,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 				Identity:    id,
 				IdentityStr: id.Value,
 				AgentAddr:   warm.IP + ":9111",
+				AuthToken:   warm.AuthToken,
 				Created:     time.Now(),
 				TTL:         ttl,
 				Memory:      memory,
@@ -306,7 +311,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 
 	// Cold start: create a new container.
 	d.Log.Info("cold starting sandbox", "id", sbxID, "image", image)
-	containerID, agentAddr, err := d.createContainer(ctx, image, memory, cpu)
+	containerID, agentAddr, err := d.createContainer(ctx, image, memory, cpu, authToken)
 	if err != nil {
 		return nil, fmt.Errorf("create container: %w", err)
 	}
@@ -319,6 +324,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		Identity:    id,
 		IdentityStr: id.Value,
 		AgentAddr:   agentAddr,
+		AuthToken:   authToken,
 		Created:     time.Now(),
 		TTL:         ttl,
 		Memory:      memory,
@@ -422,6 +428,13 @@ func (d *Daemon) ConnectAgent(sbx *Sandbox) (*proxy.AgentConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect to agent: %w", err)
 	}
+	// Authenticate if the sandbox has an auth token.
+	if sbx.AuthToken != "" {
+		if err := agent.Authenticate(sbx.AuthToken, 5*time.Second); err != nil {
+			agent.Close()
+			return nil, fmt.Errorf("agent auth: %w", err)
+		}
+	}
 	if err := agent.Ping(2 * time.Second); err != nil {
 		agent.Close()
 		return nil, fmt.Errorf("agent ping: %w", err)
@@ -431,12 +444,18 @@ func (d *Daemon) ConnectAgent(sbx *Sandbox) (*proxy.AgentConn, error) {
 
 // createContainer creates and starts a new Docker container, waits for the
 // agent to be reachable, and returns the container ID and agent address.
-func (d *Daemon) createContainer(ctx context.Context, image string, memory int64, cpu float64) (string, string, error) {
+func (d *Daemon) createContainer(ctx context.Context, image string, memory int64, cpu float64, authToken string) (string, string, error) {
 	nanoCPUs := int64(cpu * 1e9)
+
+	var envVars []string
+	if authToken != "" {
+		envVars = append(envVars, "SANDBOX_AUTH_TOKEN="+authToken)
+	}
 
 	resp, err := d.Docker.ContainerCreate(ctx,
 		&container.Config{
 			Image: image,
+			Env:   envVars,
 			Labels: map[string]string{
 				"sandboxd": "true",
 			},
@@ -444,14 +463,15 @@ func (d *Daemon) createContainer(ctx context.Context, image string, memory int64
 		&container.HostConfig{
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges"},
-			ReadonlyRootfs: false, // Writable for TTL/template sandboxes.
+			ReadonlyRootfs: true,
 			Resources: container.Resources{
 				Memory:    memory,
 				NanoCPUs:  nanoCPUs,
 				PidsLimit: ptrInt64(256),
 			},
 			Tmpfs: map[string]string{
-				"/tmp": "rw,noexec,nosuid,size=100m",
+				"/tmp":          "rw,noexec,nosuid,size=100m",
+				"/home/sandbox": "rw,noexec,nosuid,size=500m",
 			},
 		},
 		&network.NetworkingConfig{
@@ -529,16 +549,11 @@ func (d *Daemon) ensureNetwork(ctx context.Context) (string, error) {
 		}
 	}
 
-	// Create it.
-	enableICC := "false"
-	if d.Config.Network.ICC {
-		enableICC = "true"
-	}
-
+	// Create it. ICC is always disabled to prevent container-to-container communication.
 	netResp, err := d.Docker.NetworkCreate(ctx, name, network.CreateOptions{
 		Driver: "bridge",
 		Options: map[string]string{
-			"com.docker.network.bridge.enable_icc": enableICC,
+			"com.docker.network.bridge.enable_icc": "false",
 		},
 	})
 	if err != nil {

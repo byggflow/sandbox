@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	codec "github.com/byggflow/sandbox/agent/protocol"
@@ -253,9 +254,10 @@ func Upload(raw json.RawMessage, conn Conn) (interface{}, error) {
 
 		target := filepath.Join(p.Path, hdr.Name)
 
-		// Prevent path traversal
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(p.Path, target)
+		// Prevent path traversal: resolved path must stay within the base directory.
+		cleanBase := filepath.Clean(p.Path) + string(filepath.Separator)
+		if !strings.HasPrefix(filepath.Clean(target)+string(filepath.Separator), cleanBase) && filepath.Clean(target) != filepath.Clean(p.Path) {
+			return nil, fmt.Errorf("tar entry %q escapes target directory", hdr.Name)
 		}
 
 		switch hdr.Typeflag {

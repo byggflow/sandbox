@@ -2,6 +2,8 @@ package pool
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -22,6 +24,7 @@ type WarmContainer struct {
 	IP          string
 	Memory      int64
 	CPU         float64
+	AuthToken   string
 	Agent       *proxy.AgentConn
 	Created     time.Time
 }
@@ -276,9 +279,17 @@ func (m *Manager) Flush(ctx context.Context, profile string) error {
 func (m *Manager) createWarm(ctx context.Context, image, profile string, memory int64, cpu float64) (*WarmContainer, error) {
 	nanoCPUs := int64(cpu * 1e9)
 
+	// Generate auth token for this warm container.
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("generate auth token: %w", err)
+	}
+	authToken := hex.EncodeToString(tokenBytes)
+
 	resp, err := m.docker.ContainerCreate(ctx,
 		&container.Config{
 			Image: image,
+			Env:   []string{"SANDBOX_AUTH_TOKEN=" + authToken},
 			Labels: map[string]string{
 				"sandboxd":         "true",
 				"sandboxd.pool":    "warm",
@@ -357,6 +368,13 @@ func (m *Manager) createWarm(ctx context.Context, image, profile string, memory 
 		return nil, fmt.Errorf("agent ping failed: %w", err)
 	}
 
+	// Authenticate with the agent.
+	if err := agent.Authenticate(authToken, 2*time.Second); err != nil {
+		agent.Close()
+		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return nil, fmt.Errorf("agent auth: %w", err)
+	}
+
 	return &WarmContainer{
 		ContainerID: resp.ID,
 		Image:       image,
@@ -364,6 +382,7 @@ func (m *Manager) createWarm(ctx context.Context, image, profile string, memory 
 		IP:          ip,
 		Memory:      memory,
 		CPU:         cpu,
+		AuthToken:   authToken,
 		Agent:       agent,
 		Created:     time.Now(),
 	}, nil

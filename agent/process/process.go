@@ -85,9 +85,13 @@ func Exec(raw json.RawMessage) (interface{}, error) {
 		return nil, fmt.Errorf("command is required")
 	}
 
+	const maxTimeout = 300 * time.Second
 	timeout := 30 * time.Second
 	if p.Timeout > 0 {
 		timeout = time.Duration(p.Timeout) * time.Second
+		if timeout > maxTimeout {
+			timeout = maxTimeout
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

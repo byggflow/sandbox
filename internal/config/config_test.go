@@ -21,9 +21,6 @@ func TestDefaults(t *testing.T) {
 	if cfg.Network.BridgeName != "sandboxd-net" {
 		t.Errorf("unexpected default bridge_name: %s", cfg.Network.BridgeName)
 	}
-	if cfg.Network.ICC != false {
-		t.Error("expected ICC disabled by default")
-	}
 	if _, ok := cfg.Pool.Base["default"]; !ok {
 		t.Error("expected default base image config")
 	}
@@ -43,7 +40,6 @@ max_ttl = 3600
 
 [network]
 bridge_name = "test-net"
-icc = true
 
 [pool]
 total_warm = 10
@@ -84,9 +80,6 @@ cpu = 2.0
 	}
 	if cfg.Limits.MaxSandboxes != 50 {
 		t.Errorf("unexpected max_sandboxes: %d", cfg.Limits.MaxSandboxes)
-	}
-	if cfg.Network.ICC != true {
-		t.Error("expected ICC enabled")
 	}
 	if cfg.Pool.TotalWarm != 10 {
 		t.Errorf("unexpected total_warm: %d", cfg.Pool.TotalWarm)

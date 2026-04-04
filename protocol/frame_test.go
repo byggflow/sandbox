@@ -32,8 +32,8 @@ func TestPingPayloadValues(t *testing.T) {
 }
 
 func TestMaxFrameSize(t *testing.T) {
-	expected := 64 * 1024 * 1024
+	expected := 10 * 1024 * 1024
 	if MaxFrameSize != expected {
-		t.Errorf("MaxFrameSize = %d, want %d (64MB)", MaxFrameSize, expected)
+		t.Errorf("MaxFrameSize = %d, want %d (10MB)", MaxFrameSize, expected)
 	}
 }

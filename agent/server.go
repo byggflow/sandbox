@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	codec "github.com/byggflow/sandbox/agent/protocol"
 	proto "github.com/byggflow/sandbox/protocol"
@@ -18,6 +19,7 @@ import (
 // Server is the TCP server for the guest agent.
 type Server struct {
 	addr       string
+	authToken  string // If set, clients must send auth.token as first RPC call.
 	dispatcher *Dispatcher
 	listener   net.Listener
 	wg         sync.WaitGroup
@@ -25,9 +27,11 @@ type Server struct {
 }
 
 // NewServer creates a new agent server.
+// If SANDBOX_AUTH_TOKEN is set, clients must authenticate before sending commands.
 func NewServer(addr string) *Server {
 	return &Server{
 		addr:       addr,
+		authToken:  os.Getenv("SANDBOX_AUTH_TOKEN"),
 		dispatcher: NewDispatcher(),
 		quit:       make(chan struct{}),
 	}
@@ -76,6 +80,13 @@ func (s *Server) ListenAndServe() error {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	log.Printf("connection from %s", conn.RemoteAddr())
+
+	// If auth token is configured, require it as the first RPC call.
+	if s.authToken != "" {
+		if !s.authenticateConn(conn) {
+			return
+		}
+	}
 
 	rw := &connRW{conn: conn}
 
@@ -142,6 +153,70 @@ func (s *Server) handleBinaryFrame(payload []byte) {
 	if err := ptyMgr.WritePtyInput(pid, data); err != nil {
 		log.Printf("pty input error (pid %d): %v", pid, err)
 	}
+}
+
+// authenticateConn reads the first JSON-RPC frame and verifies it is an
+// auth.token call with the correct token. Returns false if auth fails.
+func (s *Server) authenticateConn(conn net.Conn) bool {
+	// Set a deadline for the auth handshake.
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	defer conn.SetDeadline(time.Time{}) // Clear deadline after auth.
+
+	frame, err := codec.ReadFrame(conn)
+	if err != nil {
+		log.Printf("auth: failed to read frame: %v", err)
+		return false
+	}
+
+	if frame.Type != proto.FrameJSON {
+		log.Printf("auth: expected JSON frame, got 0x%02x", frame.Type)
+		return false
+	}
+
+	var req proto.Request
+	if err := json.Unmarshal(frame.Payload, &req); err != nil {
+		log.Printf("auth: invalid JSON-RPC: %v", err)
+		return false
+	}
+
+	if req.Method != "auth.token" {
+		log.Printf("auth: expected auth.token, got %s", req.Method)
+		s.sendAuthError(conn, req.ID, "first call must be auth.token")
+		return false
+	}
+
+	var params struct {
+		Token string `json:"token"`
+	}
+	raw, _ := json.Marshal(req.Params)
+	if err := json.Unmarshal(raw, &params); err != nil || params.Token != s.authToken {
+		log.Printf("auth: invalid token from %s", conn.RemoteAddr())
+		s.sendAuthError(conn, req.ID, "invalid token")
+		return false
+	}
+
+	// Send success response.
+	resp := proto.Response{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result:  map[string]interface{}{"authenticated": true},
+	}
+	codec.WriteJSON(conn, resp)
+
+	log.Printf("auth: connection authenticated from %s", conn.RemoteAddr())
+	return true
+}
+
+func (s *Server) sendAuthError(conn net.Conn, id int, msg string) {
+	resp := proto.Response{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &proto.RPCError{
+			Code:    -32000,
+			Message: msg,
+		},
+	}
+	codec.WriteJSON(conn, resp)
 }
 
 // connRW wraps a net.Conn to implement io.ReadWriter.

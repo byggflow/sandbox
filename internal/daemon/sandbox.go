@@ -31,6 +31,7 @@ type Sandbox struct {
 	Identity    identity.Identity `json:"-"`
 	IdentityStr string            `json:"identity,omitempty"`
 	AgentAddr   string            `json:"-"`
+	AuthToken   string            `json:"-"` // Token for agent authentication.
 	Created     time.Time         `json:"created"`
 	TTL         int               `json:"ttl"`
 	Memory      int64             `json:"-"`
@@ -250,4 +251,13 @@ func GenerateID(nodeID string) (string, error) {
 		return "sbx-" + nodeID + "-" + hex.EncodeToString(b), nil
 	}
 	return "sbx-" + hex.EncodeToString(b), nil
+}
+
+// GenerateAuthToken creates a random 32-byte hex token for agent authentication.
+func GenerateAuthToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate auth token: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }

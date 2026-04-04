@@ -13,6 +13,6 @@ const (
 	PingResponse byte = 0x01
 )
 
-// MaxFrameSize is the maximum allowed frame payload size (64MB).
+// MaxFrameSize is the maximum allowed frame payload size (10MB).
 // Frames exceeding this limit cause an immediate connection close.
-const MaxFrameSize = 64 * 1024 * 1024
+const MaxFrameSize = 10 * 1024 * 1024
