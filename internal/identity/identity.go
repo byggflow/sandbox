@@ -98,21 +98,35 @@ func ExtractLimits(r *http.Request) RequestLimits {
 	return lim
 }
 
-// Verifier holds a parsed Ed25519 public key for signature verification.
+// Verifier holds one or more parsed Ed25519 public keys for signature verification.
+// Multiple keys enable zero-downtime key rotation.
 type Verifier struct {
-	publicKey ed25519.PublicKey
+	publicKeys []ed25519.PublicKey
 }
 
-// NewVerifier parses a base64-encoded Ed25519 public key and returns a Verifier.
-func NewVerifier(publicKeyB64 string) (*Verifier, error) {
-	raw, err := base64.StdEncoding.DecodeString(publicKeyB64)
-	if err != nil {
-		return nil, fmt.Errorf("decode public key: %w", err)
+// NewVerifier parses base64-encoded Ed25519 public keys and returns a Verifier.
+// At least one key must be provided.
+func NewVerifier(publicKeysB64 ...string) (*Verifier, error) {
+	if len(publicKeysB64) == 0 {
+		return nil, fmt.Errorf("at least one public key is required")
 	}
-	if len(raw) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("invalid public key size: got %d, want %d", len(raw), ed25519.PublicKeySize)
+	var keys []ed25519.PublicKey
+	for i, b64 := range publicKeysB64 {
+		raw, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("decode public key [%d]: %w", i, err)
+		}
+		if len(raw) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("invalid public key [%d] size: got %d, want %d", i, len(raw), ed25519.PublicKeySize)
+		}
+		keys = append(keys, ed25519.PublicKey(raw))
 	}
-	return &Verifier{publicKey: ed25519.PublicKey(raw)}, nil
+	return &Verifier{publicKeys: keys}, nil
+}
+
+// KeyCount returns the number of public keys loaded.
+func (v *Verifier) KeyCount() int {
+	return len(v.publicKeys)
 }
 
 // Verify checks that the request carries a valid Ed25519 signature over
@@ -144,11 +158,13 @@ func (v *Verifier) Verify(r *http.Request) error {
 	}
 
 	payload := buildSignPayload(r)
-	if !ed25519.Verify(v.publicKey, payload, sig) {
-		return fmt.Errorf("invalid signature")
+	for _, key := range v.publicKeys {
+		if ed25519.Verify(key, payload, sig) {
+			return nil
+		}
 	}
 
-	return nil
+	return fmt.Errorf("invalid signature")
 }
 
 // buildSignPayload constructs the byte payload that is signed/verified.

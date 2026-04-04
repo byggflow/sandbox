@@ -29,7 +29,7 @@ node_id = ""                      # short node tag embedded in sandbox IDs (e.g.
 
 [multi_tenant]
 enabled = false
-public_key = ""                   # base64-encoded Ed25519 public key from the proxy
+public_keys = []                  # base64-encoded Ed25519 public keys; multiple for rotation
 
 [limits]
 max_sandboxes = 100

@@ -344,3 +344,54 @@ func signRaw(privateKey ed25519.PrivateKey, r *http.Request) string {
 	sig := ed25519.Sign(privateKey, payload)
 	return base64.StdEncoding.EncodeToString(sig)
 }
+
+func TestMultiKeyRotation(t *testing.T) {
+	pubOld, privOld := generateTestKeypair(t)
+	pubNew, privNew := generateTestKeypair(t)
+
+	b64Old := base64.StdEncoding.EncodeToString(pubOld)
+	b64New := base64.StdEncoding.EncodeToString(pubNew)
+
+	// Verifier with both keys (rotation overlap window).
+	v, err := NewVerifier(b64Old, b64New)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.KeyCount() != 2 {
+		t.Fatalf("expected 2 keys, got %d", v.KeyCount())
+	}
+
+	t.Run("old key still works", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/sandboxes", nil)
+		req.Header.Set(Header, "cust_123")
+		sig := Sign(privOld, req)
+		req.Header.Set(HeaderSignature, sig)
+
+		if err := v.Verify(req); err != nil {
+			t.Errorf("expected old key to still verify, got: %v", err)
+		}
+	})
+
+	t.Run("new key works", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/sandboxes", nil)
+		req.Header.Set(Header, "cust_123")
+		sig := Sign(privNew, req)
+		req.Header.Set(HeaderSignature, sig)
+
+		if err := v.Verify(req); err != nil {
+			t.Errorf("expected new key to verify, got: %v", err)
+		}
+	})
+
+	t.Run("unknown key rejected", func(t *testing.T) {
+		_, privUnknown := generateTestKeypair(t)
+		req := httptest.NewRequest("POST", "/sandboxes", nil)
+		req.Header.Set(Header, "cust_123")
+		sig := Sign(privUnknown, req)
+		req.Header.Set(HeaderSignature, sig)
+
+		if err := v.Verify(req); err == nil {
+			t.Error("expected unknown key to be rejected")
+		}
+	})
+}

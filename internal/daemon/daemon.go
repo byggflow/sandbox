@@ -59,12 +59,13 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 	}
 
 	if cfg.MultiTenant.Enabled {
-		v, err := identity.NewVerifier(cfg.MultiTenant.PublicKey)
+		keys := cfg.MultiTenant.PublicKeys
+		v, err := identity.NewVerifier(keys...)
 		if err != nil {
 			return nil, fmt.Errorf("multi-tenant verifier: %w", err)
 		}
 		d.Verifier = v
-		log.Info("multi-tenant mode enabled with Ed25519 signature verification")
+		log.Info("multi-tenant mode enabled with Ed25519 signature verification", "keys", v.KeyCount())
 	}
 
 	return d, nil
@@ -153,12 +154,13 @@ func (d *Daemon) Reload(path string) error {
 
 	// Update verifier if multi-tenant config changed.
 	if cfg.MultiTenant.Enabled {
-		v, err := identity.NewVerifier(cfg.MultiTenant.PublicKey)
+		keys := cfg.MultiTenant.PublicKeys
+		v, err := identity.NewVerifier(keys...)
 		if err != nil {
 			return fmt.Errorf("reload multi-tenant verifier: %w", err)
 		}
 		d.Verifier = v
-		d.Log.Info("multi-tenant verifier reloaded")
+		d.Log.Info("multi-tenant verifier reloaded", "keys", v.KeyCount())
 	} else {
 		d.Verifier = nil
 	}

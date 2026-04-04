@@ -22,9 +22,15 @@ type Config struct {
 // MultiTenantConfig enables cryptographic identity verification.
 // When enabled, all requests (except health/metrics) must carry a valid
 // Ed25519 signature from the proxy over the identity and limit headers.
+//
+// PublicKeys supports multiple keys for zero-downtime key rotation.
+// During rotation: add the new key, update the proxy, then remove the old key.
+//
+// Environment variable override: SANDBOXD_PUBLIC_KEYS (comma-separated)
+// takes precedence over the config file values.
 type MultiTenantConfig struct {
-	Enabled   bool   `toml:"enabled"`
-	PublicKey string `toml:"public_key"` // Base64-encoded Ed25519 public key.
+	Enabled    bool     `toml:"enabled"`
+	PublicKeys []string `toml:"public_keys"` // Base64-encoded Ed25519 public keys. Multiple for rotation.
 }
 
 // ServerConfig holds listener and data directory settings.
@@ -163,8 +169,8 @@ func (c *Config) validate() error {
 	if c.Server.Socket == "" {
 		return fmt.Errorf("server.socket is required")
 	}
-	if c.MultiTenant.Enabled && c.MultiTenant.PublicKey == "" {
-		return fmt.Errorf("multi_tenant.public_key is required when multi_tenant.enabled = true")
+	if c.MultiTenant.Enabled && len(c.MultiTenant.PublicKeys) == 0 {
+		return fmt.Errorf("multi_tenant.public_keys requires at least one key when enabled")
 	}
 	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
 		return fmt.Errorf("server.tls_cert and server.tls_key must both be set or both be empty")
