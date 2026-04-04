@@ -699,7 +699,9 @@ func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{
 		"status":    "ok",
 		"sandboxes": d.Registry.Count(),
-		"pool":      d.Pool.Statuses(),
+	}
+	if d.Pool != nil {
+		resp["pool"] = d.Pool.Statuses()
 	}
 	if d.Config.Server.NodeID != "" {
 		resp["node_id"] = d.Config.Server.NodeID
