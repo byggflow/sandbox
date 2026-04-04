@@ -16,5 +16,8 @@
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.0.1"
   }
 }

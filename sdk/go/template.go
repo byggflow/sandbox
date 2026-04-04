@@ -56,7 +56,7 @@ type TemplateManager struct {
 // List returns all available templates.
 func (tm *TemplateManager) List(ctx context.Context) ([]TemplateInfo, error) {
 	client, baseURL := httpClientForEndpoint(tm.endpoint)
-	headers, err := resolveAuthHeaders(ctx, tm.auth)
+	headers, err := resolveAuthHeaders(ctx, tm.auth, http.MethodGet, "/templates")
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: auth resolve: %w", err)
 	}
@@ -96,7 +96,7 @@ func (tm *TemplateManager) Get(ctx context.Context, id string) (*TemplateInfo, e
 	}
 
 	client, baseURL := httpClientForEndpoint(tm.endpoint)
-	headers, err := resolveAuthHeaders(ctx, tm.auth)
+	headers, err := resolveAuthHeaders(ctx, tm.auth, http.MethodGet, "/templates/"+id)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: auth resolve: %w", err)
 	}
@@ -136,7 +136,7 @@ func (tm *TemplateManager) Delete(ctx context.Context, id string) error {
 	}
 
 	client, baseURL := httpClientForEndpoint(tm.endpoint)
-	headers, err := resolveAuthHeaders(ctx, tm.auth)
+	headers, err := resolveAuthHeaders(ctx, tm.auth, http.MethodDelete, "/templates/"+id)
 	if err != nil {
 		return fmt.Errorf("sandbox: auth resolve: %w", err)
 	}
