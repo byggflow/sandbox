@@ -9,8 +9,8 @@ type Options struct {
 	Endpoint string
 	// Auth provides credentials for the connection.
 	Auth Auth
-	// Image is the container image to use.
-	Image string
+	// Profile selects a pre-configured base image profile (e.g., "default", "python").
+	Profile string
 	// Template is the template ID to create from.
 	Template string
 	// Memory is the memory limit (e.g., "512m").

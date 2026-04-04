@@ -4,7 +4,7 @@
 // category accessors for filesystem, process, environment, network,
 // and template operations.
 //
-//	sbx, err := sandbox.Create(ctx, &sandbox.Options{Image: "python:3.12"})
+//	sbx, err := sandbox.Create(ctx, &sandbox.Options{Profile: "python"})
 //	if err != nil { log.Fatal(err) }
 //	defer sbx.Close()
 //
@@ -131,9 +131,13 @@ func httpClientForEndpoint(endpoint string) (*http.Client, string) {
 }
 
 // resolveAuthHeaders resolves authentication headers from an Auth provider.
-func resolveAuthHeaders(ctx context.Context, auth Auth) (map[string]string, error) {
+// If the auth implements RequestSigner, it uses method and path for per-request signing.
+func resolveAuthHeaders(ctx context.Context, auth Auth, method, path string) (map[string]string, error) {
 	if auth == nil {
 		return map[string]string{}, nil
+	}
+	if signer, ok := auth.(RequestSigner); ok {
+		return signer.ResolveForRequest(ctx, method, path)
 	}
 	return auth.Resolve(ctx)
 }
@@ -164,7 +168,7 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 	if opts != nil {
 		auth = opts.Auth
 	}
-	headers, err := resolveAuthHeaders(ctx, auth)
+	headers, err := resolveAuthHeaders(ctx, auth, http.MethodPost, "/sandboxes")
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: auth resolve: %w", err)
 	}
@@ -172,8 +176,8 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 	// Build the create request body.
 	body := map[string]interface{}{}
 	if opts != nil {
-		if opts.Image != "" {
-			body["image"] = opts.Image
+		if opts.Profile != "" {
+			body["profile"] = opts.Profile
 		}
 		if opts.Template != "" {
 			body["template"] = opts.Template
@@ -218,7 +222,28 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sandbox: create failed (status %d): %s", resp.StatusCode, string(respBody))
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
+			retryAfter := 60
+			if v := resp.Header.Get("Retry-After"); v != "" {
+				fmt.Sscanf(v, "%d", &retryAfter)
+			}
+			return nil, &CapacityError{
+				SandboxError: SandboxError{Message: string(respBody)},
+				RetryAfter:   retryAfter,
+			}
+		case http.StatusServiceUnavailable:
+			retryAfter := 2
+			if v := resp.Header.Get("Retry-After"); v != "" {
+				fmt.Sscanf(v, "%d", &retryAfter)
+			}
+			return nil, &CapacityError{
+				SandboxError: SandboxError{Message: string(respBody)},
+				RetryAfter:   retryAfter,
+			}
+		default:
+			return nil, fmt.Errorf("sandbox: create failed (status %d): %s", resp.StatusCode, string(respBody))
+		}
 	}
 
 	var info struct {
@@ -228,9 +253,18 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 		return nil, fmt.Errorf("sandbox: decode create response: %w", err)
 	}
 
+	// Re-resolve auth for the WebSocket request if using per-request signing.
+	wsHeaders := headers
+	if _, ok := auth.(RequestSigner); ok {
+		wsHeaders, err = resolveAuthHeaders(ctx, auth, http.MethodGet, "/sandboxes/"+info.ID+"/ws")
+		if err != nil {
+			return nil, fmt.Errorf("sandbox: auth resolve for ws: %w", err)
+		}
+	}
+
 	// Connect WebSocket to the sandbox.
 	wsURL := buildWSURL(endpoint, info.ID)
-	wsTransport, err := dialWS(ctx, wsURL, headers)
+	wsTransport, err := dialWS(ctx, wsURL, wsHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +322,7 @@ func Connect(ctx context.Context, id string, opts *ConnectOptions) (*Sandbox, er
 	if opts != nil {
 		auth = opts.Auth
 	}
-	headers, err := resolveAuthHeaders(ctx, auth)
+	headers, err := resolveAuthHeaders(ctx, auth, http.MethodGet, "/sandboxes/"+id+"/ws")
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: auth resolve: %w", err)
 	}

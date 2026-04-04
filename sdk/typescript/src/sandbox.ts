@@ -1,9 +1,9 @@
 import type { Auth } from "./auth.ts";
-import { resolveAuth } from "./auth.ts";
+import { isRequestSigner, resolveAuth } from "./auth.ts";
 import { call } from "./call.ts";
 import type { CallContext } from "./call.ts";
 import { negotiateE2E } from "./e2e.ts";
-import { ConnectionError } from "./errors.ts";
+import { CapacityError, ConnectionError } from "./errors.ts";
 import { WsTransport } from "./transport.ts";
 import type { RpcTransport } from "./transport.ts";
 
@@ -13,7 +13,7 @@ export interface SandboxOptions {
   /** Daemon endpoint. Defaults to unix:///var/run/sandboxd/sandboxd.sock */
   endpoint?: string;
   auth?: Auth;
-  image?: string;
+  profile?: string;
   template?: string;
   memory?: string;
   cpu?: number;
@@ -264,13 +264,20 @@ function buildSandbox(id: string, transport: RpcTransport): Sandbox {
 
 export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
-  const authResolver = resolveAuth(opts?.auth);
-  const headers = await authResolver();
   const { http, ws } = resolveEndpoints(endpoint);
+
+  // Resolve auth headers — use per-request signing if available.
+  let headers: Record<string, string>;
+  const signer = opts?.auth && isRequestSigner(opts.auth) ? opts.auth : null;
+  if (signer) {
+    headers = await signer.resolveForRequest("POST", "/sandboxes");
+  } else {
+    headers = await resolveAuth(opts?.auth)();
+  }
 
   // Create the sandbox via HTTP.
   const body: Record<string, unknown> = {};
-  if (opts?.image) body.image = opts.image;
+  if (opts?.profile) body.profile = opts.profile;
   if (opts?.template) body.template = opts.template;
   if (opts?.memory) body.memory = opts.memory;
   if (opts?.cpu) body.cpu = opts.cpu;
@@ -285,15 +292,24 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
 
   if (!response.ok) {
     const text = await response.text();
+    if (response.status === 429 || response.status === 503) {
+      const retryAfter = parseInt(response.headers.get("Retry-After") ?? "", 10);
+      throw new CapacityError(text, Number.isNaN(retryAfter) ? 60 : retryAfter);
+    }
     throw new ConnectionError(`Failed to create sandbox: ${response.status} ${text}`);
   }
 
   const data = await response.json() as { id: string };
   const sandboxId = data.id;
 
+  // Re-resolve auth for the WebSocket connection if using per-request signing.
+  const wsHeaders = signer
+    ? await signer.resolveForRequest("GET", `/sandboxes/${sandboxId}/ws`)
+    : headers;
+
   // Connect WebSocket.
   const wsTransport = new WsTransport();
-  await wsTransport.connect(`${ws}/sandboxes/${sandboxId}/ws`, headers);
+  await wsTransport.connect(`${ws}/sandboxes/${sandboxId}/ws`, wsHeaders);
 
   let transport: RpcTransport = wsTransport;
   if (opts?.encrypted) {
@@ -305,9 +321,14 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
 
 export async function connectSandbox(id: string, opts?: ConnectOptions): Promise<Sandbox> {
   const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
-  const authResolver = resolveAuth(opts?.auth);
-  const headers = await authResolver();
   const { ws } = resolveEndpoints(endpoint);
+
+  let headers: Record<string, string>;
+  if (opts?.auth && isRequestSigner(opts.auth)) {
+    headers = await opts.auth.resolveForRequest("GET", `/sandboxes/${id}/ws`);
+  } else {
+    headers = await resolveAuth(opts?.auth)();
+  }
 
   const wsTransport = new WsTransport();
   await wsTransport.connect(`${ws}/sandboxes/${id}/ws`, headers);
