@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/byggflow/sandbox/internal/config"
 	"github.com/byggflow/sandbox/internal/daemon"
+	"github.com/fsnotify/fsnotify"
 )
 
 func main() {
@@ -50,6 +52,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Watch config file for changes (hot-reload).
+	if *configPath != "" {
+		go watchConfig(*configPath, d, log)
+	}
+
 	// Handle signals.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -76,6 +83,57 @@ func main() {
 			}
 			fmt.Fprintln(os.Stderr, "sandboxd: stopped")
 			os.Exit(0)
+		}
+	}
+}
+
+// watchConfig watches the config file for changes and triggers a reload.
+// It debounces rapid writes (e.g. atomic rename by Infisical agent) to
+// avoid reloading multiple times for a single logical update.
+func watchConfig(path string, d *daemon.Daemon, log *slog.Logger) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Error("failed to create config file watcher", "error", err)
+		return
+	}
+	defer watcher.Close()
+
+	if err := watcher.Add(path); err != nil {
+		log.Error("failed to watch config file", "path", path, "error", err)
+		return
+	}
+
+	log.Info("watching config file for changes", "path", path)
+
+	var debounce *time.Timer
+	for {
+		select {
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+				// Debounce: wait 500ms for writes to settle before reloading.
+				if debounce != nil {
+					debounce.Stop()
+				}
+				debounce = time.AfterFunc(500*time.Millisecond, func() {
+					log.Info("config file changed, reloading", "path", path)
+					if err := d.Reload(path); err != nil {
+						log.Error("config reload failed", "error", err)
+					}
+				})
+			}
+			// Re-watch on Create (atomic rename replaces the inode).
+			if event.Has(fsnotify.Create) {
+				_ = watcher.Remove(path)
+				_ = watcher.Add(path)
+			}
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Error("config file watcher error", "error", err)
 		}
 	}
 }
