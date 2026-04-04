@@ -1,0 +1,20 @@
+{
+  "name": "@byggflow/sandbox",
+  "version": "0.0.1",
+  "description": "TypeScript SDK for sandboxd",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": ["src", "dist"],
+  "scripts": {
+    "test": "bunx --bun vitest run",
+    "build": "bun build src/index.ts --outdir dist --target node"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "vitest": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
