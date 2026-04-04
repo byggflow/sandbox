@@ -2,6 +2,7 @@ import type { Auth } from "./auth.ts";
 import { resolveAuth } from "./auth.ts";
 import { call } from "./call.ts";
 import type { CallContext } from "./call.ts";
+import { negotiateE2E } from "./e2e.ts";
 import { ConnectionError } from "./errors.ts";
 import { WsTransport } from "./transport.ts";
 import type { RpcTransport } from "./transport.ts";
@@ -289,8 +290,13 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   const sandboxId = data.id;
 
   // Connect WebSocket.
-  const transport = new WsTransport();
-  await transport.connect(`${ws}/sandboxes/${sandboxId}/ws`, headers);
+  const wsTransport = new WsTransport();
+  await wsTransport.connect(`${ws}/sandboxes/${sandboxId}/ws`, headers);
+
+  let transport: RpcTransport = wsTransport;
+  if (opts?.encrypted) {
+    transport = await negotiateE2E(wsTransport);
+  }
 
   return buildSandbox(sandboxId, transport);
 }
@@ -301,8 +307,13 @@ export async function connectSandbox(id: string, opts?: ConnectOptions): Promise
   const headers = await authResolver();
   const { ws } = resolveEndpoints(endpoint);
 
-  const transport = new WsTransport();
-  await transport.connect(`${ws}/sandboxes/${id}/ws`, headers);
+  const wsTransport = new WsTransport();
+  await wsTransport.connect(`${ws}/sandboxes/${id}/ws`, headers);
+
+  let transport: RpcTransport = wsTransport;
+  if (opts?.encrypted) {
+    transport = await negotiateE2E(wsTransport);
+  }
 
   return buildSandbox(id, transport);
 }
