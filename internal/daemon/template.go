@@ -87,6 +87,18 @@ func (r *TemplateRegistry) Count() int {
 	return len(r.templates)
 }
 
+// All returns a snapshot of all templates in the registry.
+func (r *TemplateRegistry) All() []*Template {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	result := make([]*Template, 0, len(r.templates))
+	for _, tpl := range r.templates {
+		result = append(result, tpl)
+	}
+	return result
+}
+
 // MarkUsed updates the LastUsedAt timestamp for a template.
 func (r *TemplateRegistry) MarkUsed(id string) {
 	r.mu.Lock()

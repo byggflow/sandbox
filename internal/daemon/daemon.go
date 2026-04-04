@@ -12,6 +12,7 @@ import (
 	"github.com/byggflow/sandbox/internal/proxy"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 )
@@ -25,6 +26,7 @@ type Daemon struct {
 	Templates *TemplateRegistry
 	Identity  *identity.Extractor
 	Server    *Server
+	Metrics   *Metrics
 	Log       *slog.Logger
 
 	networkID string
@@ -50,9 +52,10 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 			Header:         cfg.Server.IdentityHeader,
 			SystemIdentity: cfg.Server.SystemIdentity,
 		},
-		Log:    log,
-		ctx:    ctx,
-		cancel: cancel,
+		Metrics: NewMetrics(),
+		Log:     log,
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 
 	return d, nil
@@ -78,6 +81,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.Server = NewServer(d)
 	if err := d.Server.Start(); err != nil {
 		return fmt.Errorf("start server: %w", err)
+	}
+
+	// Start template expiry goroutine if configured.
+	if d.Config.Limits.TemplateExpiryDays > 0 {
+		go d.runTemplateExpiry(d.ctx)
 	}
 
 	d.Log.Info("sandboxd started",
@@ -254,6 +262,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 			if err := d.Registry.Add(sbx); err != nil {
 				return nil, err
 			}
+			d.Metrics.IncCreateWarm()
 			d.Log.Info("sandbox created (warm)", "id", sbxID, "container", warm.ContainerID[:12])
 			return sbx, nil
 		}
@@ -286,6 +295,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		return nil, err
 	}
 
+	d.Metrics.IncCreateCold()
 	d.Log.Info("sandbox created (cold)", "id", sbxID, "container", containerID[:12])
 	return sbx, nil
 }
@@ -293,6 +303,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 // DestroySandbox removes a sandbox and its container.
 func (d *Daemon) DestroySandbox(ctx context.Context, sbx *Sandbox) error {
 	sbx.CancelReaper()
+	d.Metrics.IncDestroy()
 	return d.destroySandbox(ctx, sbx)
 }
 
@@ -489,6 +500,58 @@ func (d *Daemon) ensureNetwork(ctx context.Context) (string, error) {
 
 	d.Log.Info("created network", "name", name, "id", netResp.ID[:12])
 	return netResp.ID, nil
+}
+
+// runTemplateExpiry periodically checks for expired templates and removes them.
+// A template is expired if its LastUsedAt is older than template_expiry_days.
+// Templates that have never been used fall back to CreatedAt for the check.
+func (d *Daemon) runTemplateExpiry(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	d.Log.Info("template expiry started", "expiry_days", d.Config.Limits.TemplateExpiryDays)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.expireTemplates(ctx)
+		}
+	}
+}
+
+func (d *Daemon) expireTemplates(ctx context.Context) {
+	expiryDays := d.Config.Limits.TemplateExpiryDays
+	if expiryDays <= 0 {
+		return
+	}
+
+	cutoff := time.Now().Add(-time.Duration(expiryDays) * 24 * time.Hour)
+
+	for _, tpl := range d.Templates.All() {
+		// Use LastUsedAt if available, otherwise fall back to CreatedAt.
+		ref := tpl.LastUsedAt
+		if ref.IsZero() {
+			ref = tpl.CreatedAt
+		}
+
+		if ref.Before(cutoff) {
+			d.Log.Info("expiring template", "id", tpl.ID, "label", tpl.Label, "last_used", ref)
+
+			if _, ok := d.Templates.Remove(tpl.ID); !ok {
+				continue
+			}
+
+			// Remove the Docker image.
+			if tpl.Image != "" {
+				_, err := d.Docker.ImageRemove(ctx, tpl.Image, image.RemoveOptions{Force: false, PruneChildren: true})
+				if err != nil {
+					d.Log.Error("failed to remove expired template image", "id", tpl.ID, "image", tpl.Image, "error", err)
+				}
+			}
+		}
+	}
 }
 
 func ptrInt64(v int64) *int64 {
