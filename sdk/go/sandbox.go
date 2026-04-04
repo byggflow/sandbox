@@ -177,9 +177,21 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 
 	// Connect WebSocket to the sandbox.
 	wsURL := buildWSURL(endpoint, info.ID)
-	transport, err := dialWS(ctx, wsURL, headers)
+	wsTransport, err := dialWS(ctx, wsURL, headers)
 	if err != nil {
 		return nil, err
+	}
+
+	var transport RpcTransport = wsTransport
+
+	// Negotiate E2E encryption if requested.
+	if opts != nil && opts.Encrypted {
+		session, err := negotiateE2E(ctx, wsTransport)
+		if err != nil {
+			wsTransport.Close()
+			return nil, fmt.Errorf("sandbox: e2e negotiation: %w", err)
+		}
+		transport = &encryptedTransport{inner: wsTransport, session: session}
 	}
 
 	sbx := &Sandbox{
@@ -227,9 +239,21 @@ func Connect(ctx context.Context, id string, opts *ConnectOptions) (*Sandbox, er
 
 	// Connect WebSocket to the sandbox.
 	wsURL := buildWSURL(endpoint, id)
-	transport, err := dialWS(ctx, wsURL, headers)
+	wsTransport, err := dialWS(ctx, wsURL, headers)
 	if err != nil {
 		return nil, err
+	}
+
+	var transport RpcTransport = wsTransport
+
+	// Negotiate E2E encryption if requested.
+	if opts != nil && opts.Encrypted {
+		session, err := negotiateE2E(ctx, wsTransport)
+		if err != nil {
+			wsTransport.Close()
+			return nil, fmt.Errorf("sandbox: e2e negotiation: %w", err)
+		}
+		transport = &encryptedTransport{inner: wsTransport, session: session}
 	}
 
 	sbx := &Sandbox{
