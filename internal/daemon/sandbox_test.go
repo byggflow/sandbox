@@ -132,3 +132,37 @@ func TestSandboxStateTransitions(t *testing.T) {
 		t.Error("expected running again")
 	}
 }
+
+func TestRegistryCountByIdentity(t *testing.T) {
+	reg := NewRegistry()
+
+	// Add sandboxes with different identities.
+	reg.Add(&Sandbox{ID: "sbx-a1", IdentityStr: "alice"})
+	reg.Add(&Sandbox{ID: "sbx-a2", IdentityStr: "alice"})
+	reg.Add(&Sandbox{ID: "sbx-a3", IdentityStr: "alice"})
+	reg.Add(&Sandbox{ID: "sbx-b1", IdentityStr: "bob"})
+	reg.Add(&Sandbox{ID: "sbx-none", IdentityStr: ""})
+
+	tests := []struct {
+		identity string
+		want     int
+	}{
+		{"alice", 3},
+		{"bob", 1},
+		{"charlie", 0},
+		{"", 1},
+	}
+
+	for _, tt := range tests {
+		got := reg.CountByIdentity(tt.identity)
+		if got != tt.want {
+			t.Errorf("CountByIdentity(%q) = %d, want %d", tt.identity, got, tt.want)
+		}
+	}
+
+	// Remove one of alice's sandboxes and verify count updates.
+	reg.Remove("sbx-a1")
+	if got := reg.CountByIdentity("alice"); got != 2 {
+		t.Errorf("after remove: CountByIdentity(alice) = %d, want 2", got)
+	}
+}

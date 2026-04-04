@@ -29,13 +29,14 @@ type ServerConfig struct {
 
 // LimitsConfig holds resource limit settings.
 type LimitsConfig struct {
-	MaxSandboxes       int     `toml:"max_sandboxes"`
-	MaxMemory          string  `toml:"max_memory"`
-	MaxCPU             float64 `toml:"max_cpu"`
-	MaxTTL             int     `toml:"max_ttl"`
-	MaxTemplates       int     `toml:"max_templates"`
-	MaxTemplateSize    string  `toml:"max_template_size"`
-	TemplateExpiryDays int     `toml:"template_expiry_days"`
+	MaxSandboxes            int     `toml:"max_sandboxes"`
+	MaxSandboxesPerIdentity int     `toml:"max_sandboxes_per_identity"`
+	MaxMemory               string  `toml:"max_memory"`
+	MaxCPU                  float64 `toml:"max_cpu"`
+	MaxTTL                  int     `toml:"max_ttl"`
+	MaxTemplates            int     `toml:"max_templates"`
+	MaxTemplateSize         string  `toml:"max_template_size"`
+	TemplateExpiryDays      int     `toml:"template_expiry_days"`
 }
 
 // NetworkConfig holds Docker network settings.
@@ -99,13 +100,14 @@ func Defaults() Config {
 			SystemIdentity: "_system",
 		},
 		Limits: LimitsConfig{
-			MaxSandboxes:       100,
-			MaxMemory:          "4g",
-			MaxCPU:             4.0,
-			MaxTTL:             86400,
-			MaxTemplates:       50,
-			MaxTemplateSize:    "2g",
-			TemplateExpiryDays: 60,
+			MaxSandboxes:            100,
+			MaxSandboxesPerIdentity: 20,
+			MaxMemory:               "4g",
+			MaxCPU:                  4.0,
+			MaxTTL:                  86400,
+			MaxTemplates:            50,
+			MaxTemplateSize:         "2g",
+			TemplateExpiryDays:      60,
 		},
 		Network: NetworkConfig{
 			BridgeName: "sandboxd-net",

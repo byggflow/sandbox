@@ -17,6 +17,7 @@ system_identity = "_system"
 
 [limits]
 max_sandboxes = 100
+max_sandboxes_per_identity = 20  # per identity, 0 = unlimited
 max_memory = "4g"
 max_cpu = 4.0
 max_ttl = 86400                   # 24 hours
