@@ -1,0 +1,33 @@
+services:
+  # Build the test base image (sandbox with agent baked in).
+  # This service exits immediately — it only exists to produce the image.
+  test-base-build:
+    image: sandbox-test-base:latest
+    build:
+      context: .
+      dockerfile: images/base/Dockerfile
+    entrypoint: ["echo", "base image built"]
+    restart: "no"
+
+  sandboxd:
+    build:
+      context: .
+      dockerfile: images/sandboxd/Dockerfile
+    command: ["--config", "/etc/sandboxd/config.toml"]
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandboxd-socket:/var/run/sandboxd
+      - ./config/sandboxd.test.toml:/etc/sandboxd/config.toml:ro
+    depends_on:
+      test-base-build:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7522/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+volumes:
+  sandboxd-socket:
