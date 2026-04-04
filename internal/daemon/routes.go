@@ -34,6 +34,7 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 	mux.HandleFunc("POST /pools/{profile}/flush", d.handlePoolFlush)
 
 	mux.HandleFunc("GET /events", d.handleEvents)
+	mux.HandleFunc("GET /events/history", d.handleEventsHistory)
 
 	mux.HandleFunc("GET /health", d.handleHealth)
 	mux.HandleFunc("GET /metrics", d.handleMetrics)
@@ -586,7 +587,7 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// Optional identity filter.
 	identityFilter := r.URL.Query().Get("identity")
 
-	// Subscribe to events.
+	// Subscribe BEFORE replaying history so we don't miss events in the gap.
 	subID, ch := d.Events.Subscribe(64)
 	defer d.Events.Unsubscribe(subID)
 
@@ -596,6 +597,30 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
+
+	// Replay missed events if the client sent Last-Event-ID (standard SSE reconnect).
+	if lastID := r.Header.Get("Last-Event-ID"); lastID != "" {
+		var afterID uint64
+		if _, err := fmt.Sscanf(lastID, "%d", &afterID); err == nil && afterID > 0 {
+			missed, complete := d.Events.Since(afterID)
+			if !complete {
+				// Tell the client some events were lost.
+				fmt.Fprintf(w, "event: events.gap\ndata: {\"after_id\":%d,\"message\":\"some events were lost\"}\n\n", afterID)
+				flusher.Flush()
+			}
+			for _, event := range missed {
+				if identityFilter != "" && event.Identity != identityFilter {
+					continue
+				}
+				data, err := json.Marshal(event)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "id: %d\ndata: %s\n\n", event.ID, data)
+			}
+			flusher.Flush()
+		}
+	}
 
 	ctx := r.Context()
 	for {
@@ -618,10 +643,56 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			fmt.Fprintf(w, "id: %d\ndata: %s\n\n", event.ID, data)
 			flusher.Flush()
 		}
 	}
+}
+
+func (d *Daemon) handleEventsHistory(w http.ResponseWriter, r *http.Request) {
+	afterStr := r.URL.Query().Get("after")
+	var afterID uint64
+	if afterStr != "" {
+		if _, err := fmt.Sscanf(afterStr, "%d", &afterID); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid 'after' parameter — must be a numeric event ID")
+			return
+		}
+	}
+
+	limitStr := r.URL.Query().Get("limit")
+	limit := 1000
+	if limitStr != "" {
+		if _, err := fmt.Sscanf(limitStr, "%d", &limit); err != nil || limit <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid 'limit' parameter")
+			return
+		}
+		if limit > 10_000 {
+			limit = 10_000
+		}
+	}
+
+	identityFilter := r.URL.Query().Get("identity")
+
+	events, complete := d.Events.Since(afterID)
+
+	// Apply identity filter and limit.
+	filtered := make([]Event, 0, len(events))
+	for _, ev := range events {
+		if identityFilter != "" && ev.Identity != identityFilter {
+			continue
+		}
+		filtered = append(filtered, ev)
+		if len(filtered) >= limit {
+			break
+		}
+	}
+
+	resp := map[string]interface{}{
+		"events":   filtered,
+		"complete": complete,
+		"seq":      d.Events.Seq(),
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -629,6 +700,9 @@ func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":    "ok",
 		"sandboxes": d.Registry.Count(),
 		"pool":      d.Pool.Statuses(),
+	}
+	if d.Config.Server.NodeID != "" {
+		resp["node_id"] = d.Config.Server.NodeID
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

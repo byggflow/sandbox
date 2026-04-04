@@ -54,7 +54,7 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 			SystemIdentity: cfg.Server.SystemIdentity,
 		},
 		Metrics: NewMetrics(),
-		Events:  NewEventBus(),
+		Events:  NewEventBus(0),
 		Log:     log,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -240,7 +240,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	}
 
 	// Generate ID.
-	sbxID, err := GenerateID()
+	sbxID, err := GenerateID(d.Config.Server.NodeID)
 	if err != nil {
 		return nil, err
 	}

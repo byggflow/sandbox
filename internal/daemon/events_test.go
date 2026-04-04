@@ -6,7 +6,7 @@ import (
 )
 
 func TestEventBusPublishAndReceive(t *testing.T) {
-	bus := NewEventBus()
+	bus := NewEventBus(0)
 
 	id, ch := bus.Subscribe(10)
 	defer bus.Unsubscribe(id)
@@ -41,7 +41,7 @@ func TestEventBusPublishAndReceive(t *testing.T) {
 }
 
 func TestEventBusMultipleSubscribers(t *testing.T) {
-	bus := NewEventBus()
+	bus := NewEventBus(0)
 
 	id1, ch1 := bus.Subscribe(10)
 	defer bus.Unsubscribe(id1)
@@ -74,7 +74,7 @@ func TestEventBusMultipleSubscribers(t *testing.T) {
 }
 
 func TestEventBusDropWhenBufferFull(t *testing.T) {
-	bus := NewEventBus()
+	bus := NewEventBus(0)
 
 	// Buffer size of 2.
 	id, ch := bus.Subscribe(2)
@@ -106,7 +106,7 @@ done:
 }
 
 func TestEventBusUnsubscribe(t *testing.T) {
-	bus := NewEventBus()
+	bus := NewEventBus(0)
 
 	id, ch := bus.Subscribe(10)
 
@@ -132,11 +132,96 @@ func TestEventBusUnsubscribe(t *testing.T) {
 }
 
 func TestEventBusUnsubscribeIdempotent(t *testing.T) {
-	bus := NewEventBus()
+	bus := NewEventBus(0)
 
 	id, _ := bus.Subscribe(10)
 
 	// Unsubscribe twice should not panic.
 	bus.Unsubscribe(id)
 	bus.Unsubscribe(id)
+}
+
+func TestEventBusSequenceIDs(t *testing.T) {
+	bus := NewEventBus(0)
+
+	id, ch := bus.Subscribe(10)
+	defer bus.Unsubscribe(id)
+
+	for i := 0; i < 3; i++ {
+		bus.Publish(Event{Type: "sandbox.created", SandboxID: "sbx-seq"})
+	}
+
+	for i := 1; i <= 3; i++ {
+		ev := <-ch
+		if ev.ID != uint64(i) {
+			t.Errorf("event %d: expected ID %d, got %d", i, i, ev.ID)
+		}
+	}
+
+	if bus.Seq() != 3 {
+		t.Errorf("expected Seq()=3, got %d", bus.Seq())
+	}
+}
+
+func TestEventBusSinceReplay(t *testing.T) {
+	bus := NewEventBus(100)
+
+	// Publish 5 events.
+	for i := 0; i < 5; i++ {
+		bus.Publish(Event{Type: "sandbox.created", SandboxID: "sbx-replay"})
+	}
+
+	// Replay from event 3 — should get events 4 and 5.
+	events, complete := bus.Since(3)
+	if !complete {
+		t.Error("expected complete=true")
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].ID != 4 {
+		t.Errorf("expected first replayed ID=4, got %d", events[0].ID)
+	}
+	if events[1].ID != 5 {
+		t.Errorf("expected second replayed ID=5, got %d", events[1].ID)
+	}
+}
+
+func TestEventBusSinceAll(t *testing.T) {
+	bus := NewEventBus(100)
+
+	for i := 0; i < 3; i++ {
+		bus.Publish(Event{Type: "sandbox.created", SandboxID: "sbx-all"})
+	}
+
+	// Since(0) returns everything.
+	events, complete := bus.Since(0)
+	if !complete {
+		t.Error("expected complete=true")
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+}
+
+func TestEventBusSinceGap(t *testing.T) {
+	// Small ring buffer — only holds 3 events.
+	bus := NewEventBus(3)
+
+	// Publish 5 events. Events 1-2 are evicted.
+	for i := 0; i < 5; i++ {
+		bus.Publish(Event{Type: "sandbox.created", SandboxID: "sbx-gap"})
+	}
+
+	// Ask for events after ID 1 — but ID 2 has been evicted.
+	events, complete := bus.Since(1)
+	if complete {
+		t.Error("expected complete=false because events were evicted")
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events (3,4,5), got %d", len(events))
+	}
+	if events[0].ID != 3 {
+		t.Errorf("expected first event ID=3, got %d", events[0].ID)
+	}
 }
