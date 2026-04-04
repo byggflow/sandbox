@@ -12,15 +12,38 @@ import (
 	"github.com/byggflow/sandbox/protocol"
 )
 
-// AgentConn manages a binary-framed TCP connection to a guest agent.
+// Dialer abstracts how connections are established to guest agents.
+// The default implementation dials TCP, but alternatives (e.g., vsock for
+// Firecracker microVMs) can be provided by implementing this interface.
+type Dialer interface {
+	Dial(addr string, timeout time.Duration) (net.Conn, error)
+}
+
+// TCPDialer is the default Dialer that connects over TCP.
+type TCPDialer struct{}
+
+// Dial connects to the agent at the given TCP address (host:port).
+func (TCPDialer) Dial(addr string, timeout time.Duration) (net.Conn, error) {
+	return net.DialTimeout("tcp", addr, timeout)
+}
+
+// DefaultDialer is the package-level default dialer used by Dial().
+var DefaultDialer Dialer = TCPDialer{}
+
+// AgentConn manages a binary-framed connection to a guest agent.
 type AgentConn struct {
 	conn net.Conn
 	mu   sync.Mutex // serializes writes
 }
 
-// Dial connects to the agent at the given address (host:port).
+// Dial connects to the agent using the DefaultDialer.
 func Dial(addr string, timeout time.Duration) (*AgentConn, error) {
-	conn, err := net.DialTimeout("tcp", addr, timeout)
+	return DialWith(DefaultDialer, addr, timeout)
+}
+
+// DialWith connects to the agent using the provided Dialer.
+func DialWith(d Dialer, addr string, timeout time.Duration) (*AgentConn, error) {
+	conn, err := d.Dial(addr, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial agent %s: %w", addr, err)
 	}

@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -76,6 +77,59 @@ func TestStatusesEmpty(t *testing.T) {
 	}
 	if statuses[0].Profile != "default" {
 		t.Errorf("expected profile 'default', got %s", statuses[0].Profile)
+	}
+}
+
+func TestHealthCheckEmptyPool(t *testing.T) {
+	m := &Manager{
+		cfg: config.PoolConfig{
+			HealthInterval:  "10s",
+			LivenessTimeout: "5ms",
+			Base: map[string]config.BaseImageConfig{
+				"default": {Image: "test:latest", Memory: "512m", CPU: 1.0},
+			},
+		},
+		warm:  make(map[string][]*WarmContainer),
+		freq:  make(map[string][]time.Time),
+		close: make(chan struct{}),
+		log:   slog.Default(),
+	}
+
+	// Should not panic on empty pool.
+	m.healthCheck()
+
+	if len(m.warm) != 0 {
+		t.Errorf("expected empty warm map, got %d entries", len(m.warm))
+	}
+}
+
+func TestHealthCheckRemovesNilAgent(t *testing.T) {
+	m := &Manager{
+		cfg: config.PoolConfig{
+			HealthInterval:  "10s",
+			LivenessTimeout: "5ms",
+			Base: map[string]config.BaseImageConfig{
+				"default": {Image: "test:latest", Memory: "512m", CPU: 1.0},
+			},
+		},
+		warm: map[string][]*WarmContainer{
+			"test:latest": {
+				{ContainerID: "abc123456789", Agent: nil, Image: "test:latest"},
+			},
+		},
+		freq:  make(map[string][]time.Time),
+		close: make(chan struct{}),
+		log:   slog.Default(),
+	}
+
+	m.healthCheck()
+
+	// Containers with nil agent should be removed.
+	m.mu.Lock()
+	count := len(m.warm["test:latest"])
+	m.mu.Unlock()
+	if count != 0 {
+		t.Errorf("expected 0 warm containers after health check, got %d", count)
 	}
 }
 

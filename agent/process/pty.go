@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 
 	codec "github.com/byggflow/sandbox/agent/protocol"
 	proto "github.com/byggflow/sandbox/protocol"
@@ -60,6 +61,7 @@ func (m *PtyManager) StartPty(raw json.RawMessage, conn io.ReadWriter) (interfac
 	}
 
 	cmd := exec.Command("sh", "-c", command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if p.Cwd != "" {
 		cmd.Dir = p.Cwd
 	}
@@ -188,4 +190,16 @@ func (m *PtyManager) HasPty(pid int) bool {
 	defer m.mu.RUnlock()
 	_, ok := m.procs[pid]
 	return ok
+}
+
+// Cleanup kills all PTY process groups and closes their master fds.
+func (m *PtyManager) Cleanup() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for pid, pp := range m.procs {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		pp.ptm.Close()
+	}
+	m.procs = make(map[int]*PtyProcess)
 }

@@ -13,7 +13,6 @@ import (
 	"github.com/byggflow/sandbox/internal/proxy"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 )
@@ -25,6 +24,7 @@ type Daemon struct {
 	Pool      *pool.Manager
 	Registry  *Registry
 	Templates *TemplateRegistry
+	TemplateBackend TemplateBackend // Pluggable capture/remove for templates.
 	Server    *Server
 	Metrics   *Metrics
 	Events    *EventBus
@@ -48,17 +48,18 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	d := &Daemon{
-		Config:    cfg,
-		Docker:    docker,
-		Registry:  NewRegistry(),
-		Templates: NewTemplateRegistry(),
-		Metrics:   NewMetrics(),
-		Events:    NewEventBus(0),
-		AuthLimit:   newRateLimiter(10, 1*time.Minute),
-		CreateLimit: newRateLimiter(20, 1*time.Minute),
-		Log:       log,
-		ctx:       ctx,
-		cancel:    cancel,
+		Config:          cfg,
+		Docker:          docker,
+		Registry:        NewRegistry(),
+		Templates:       NewTemplateRegistry(),
+		TemplateBackend: &DockerTemplateBackend{Docker: docker},
+		Metrics:         NewMetrics(),
+		Events:          NewEventBus(0),
+		AuthLimit:       newRateLimiter(10, 1*time.Minute),
+		CreateLimit:     newRateLimiter(20, 1*time.Minute),
+		Log:             log,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 
 	if cfg.MultiTenant.Enabled {
@@ -613,10 +614,9 @@ func (d *Daemon) expireTemplates(ctx context.Context) {
 				continue
 			}
 
-			// Remove the Docker image.
+			// Remove the underlying image/snapshot via backend.
 			if tpl.Image != "" {
-				_, err := d.Docker.ImageRemove(ctx, tpl.Image, image.RemoveOptions{Force: false, PruneChildren: true})
-				if err != nil {
+				if err := d.TemplateBackend.Remove(ctx, tpl.Image); err != nil {
 					d.Log.Error("failed to remove expired template image", "id", tpl.ID, "image", tpl.Image, "error", err)
 				}
 			}

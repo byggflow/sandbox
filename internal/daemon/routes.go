@@ -504,27 +504,19 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Docker commit the container.
+	// Capture the template via the pluggable backend (Docker commit, Firecracker snapshot, etc.).
 	imageTag := "byggflow-sandbox:" + tplID
-	commitResp, err := d.Docker.ContainerCommit(r.Context(), sbx.ContainerID, containerCommitOptions(imageTag))
+	ref, imageSize, err := d.TemplateBackend.Capture(r.Context(), sbx.ContainerID, imageTag)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("docker commit failed: %v", err))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("template capture failed: %v", err))
 		return
-	}
-
-	// Get the image size.
-	imageInspect, _, err := d.Docker.ImageInspectWithRaw(r.Context(), commitResp.ID)
-	imageSize := int64(0)
-	if err == nil {
-		imageSize = imageInspect.Size
 	}
 
 	// Check max template size.
 	if d.Config.Limits.MaxTemplateSize != "" {
 		maxSize, parseErr := parseByteSize(d.Config.Limits.MaxTemplateSize)
 		if parseErr == nil && imageSize > maxSize {
-			// Remove the image since it's too large.
-			_, _ = d.Docker.ImageRemove(r.Context(), commitResp.ID, imageRemoveOptions())
+			_ = d.TemplateBackend.Remove(r.Context(), ref)
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("template size %d exceeds limit", imageSize))
 			return
 		}
@@ -538,7 +530,8 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	tpl := &Template{
 		ID:        tplID,
 		Label:     label,
-		Image:     imageTag,
+		Image:     ref,
+		Backend:   "docker",
 		Identity:  id.Value,
 		Size:      imageSize,
 		CreatedAt: time.Now(),
@@ -549,7 +542,7 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.Log.Info("template created", "id", tplID, "sandbox", req.SandboxID, "image", imageTag)
+	d.Log.Info("template created", "id", tplID, "sandbox", req.SandboxID, "image", ref)
 	writeJSON(w, http.StatusCreated, tpl)
 }
 
@@ -606,8 +599,8 @@ func (d *Daemon) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove Docker image.
-	_, _ = d.Docker.ImageRemove(r.Context(), tpl.Image, imageRemoveOptions())
+	// Remove underlying image/snapshot via backend.
+	_ = d.TemplateBackend.Remove(r.Context(), tpl.Image)
 
 	// Remove from registry.
 	d.Templates.Remove(tplID)

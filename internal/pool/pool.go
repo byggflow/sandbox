@@ -418,30 +418,90 @@ func (m *Manager) healthLoop() {
 	}
 }
 
-func (m *Manager) healthCheck() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// healthCheckConcurrency is the max number of parallel pings during health checks.
+const healthCheckConcurrency = 10
 
-	for image, containers := range m.warm {
-		var alive []*WarmContainer
-		for _, wc := range containers {
-			if wc.Agent == nil {
-				continue
-			}
-			if err := wc.Agent.Ping(2 * time.Second); err != nil {
-				m.log.Warn("health check failed", "container", wc.ContainerID[:12], "error", err)
-				wc.Agent.Close()
-				go func(id string) {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					_ = m.docker.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
-				}(wc.ContainerID)
-				continue
-			}
-			alive = append(alive, wc)
-		}
-		m.warm[image] = alive
+func (m *Manager) healthCheck() {
+	// Snapshot all warm containers under lock.
+	m.mu.Lock()
+	type entry struct {
+		image string
+		wc    *WarmContainer
 	}
+	var all []entry
+	for image, containers := range m.warm {
+		for _, wc := range containers {
+			all = append(all, entry{image: image, wc: wc})
+		}
+	}
+	m.mu.Unlock()
+
+	if len(all) == 0 {
+		return
+	}
+
+	// Ping in parallel with bounded concurrency.
+	type result struct {
+		entry entry
+		alive bool
+	}
+	results := make([]result, len(all))
+	sem := make(chan struct{}, healthCheckConcurrency)
+	var wg sync.WaitGroup
+
+	for i, e := range all {
+		wg.Add(1)
+		go func(idx int, e entry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if e.wc.Agent == nil {
+				results[idx] = result{entry: e, alive: false}
+				return
+			}
+			if err := e.wc.Agent.Ping(2 * time.Second); err != nil {
+				m.log.Warn("health check failed", "container", e.wc.ContainerID[:12], "error", err)
+				results[idx] = result{entry: e, alive: false}
+				return
+			}
+			results[idx] = result{entry: e, alive: true}
+		}(i, e)
+	}
+	wg.Wait()
+
+	// Track which images were in the snapshot so we can preserve newly added ones.
+	snapshotImages := make(map[string]bool)
+	for _, e := range all {
+		snapshotImages[e.image] = true
+	}
+
+	// Rebuild warm map under lock.
+	m.mu.Lock()
+	newWarm := make(map[string][]*WarmContainer)
+	for _, r := range results {
+		if r.alive {
+			newWarm[r.entry.image] = append(newWarm[r.entry.image], r.entry.wc)
+		} else {
+			wc := r.entry.wc
+			if wc.Agent != nil {
+				wc.Agent.Close()
+			}
+			go func(id string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = m.docker.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
+			}(wc.ContainerID)
+		}
+	}
+	// Preserve images that were added after the snapshot was taken.
+	for image, containers := range m.warm {
+		if !snapshotImages[image] && len(containers) > 0 {
+			newWarm[image] = containers
+		}
+	}
+	m.warm = newWarm
+	m.mu.Unlock()
 }
 
 // rebalanceLoop periodically adjusts warm container allocation based on creation frequency.

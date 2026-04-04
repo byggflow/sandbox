@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -10,15 +11,28 @@ import (
 	"github.com/byggflow/sandbox/internal/identity"
 )
 
-// Template represents a saved sandbox template (committed Docker image).
+// TemplateBackend abstracts how templates are captured and cleaned up.
+// The default implementation uses Docker commit; a Firecracker implementation
+// would snapshot memory + disk state instead.
+type TemplateBackend interface {
+	// Capture creates a template from a running sandbox, returning the
+	// image/snapshot reference and its size in bytes.
+	Capture(ctx context.Context, containerID, tag string) (ref string, size int64, err error)
+
+	// Remove deletes the underlying image or snapshot files.
+	Remove(ctx context.Context, ref string) error
+}
+
+// Template represents a saved sandbox template.
 type Template struct {
-	ID         string    `json:"id"`
-	Label      string    `json:"label"`
-	Image      string    `json:"image"`
-	Identity   string    `json:"identity,omitempty"`
-	Size       int64     `json:"size"`
-	CreatedAt  time.Time `json:"created_at"`
-	LastUsedAt time.Time `json:"last_used,omitempty"`
+	ID         string       `json:"id"`
+	Label      string       `json:"label"`
+	Image      string       `json:"image"`        // Docker image tag or snapshot path.
+	Backend    string       `json:"backend"`       // "docker" or "firecracker".
+	Identity   string       `json:"identity,omitempty"`
+	Size       int64        `json:"size"`
+	CreatedAt  time.Time    `json:"created_at"`
+	LastUsedAt time.Time    `json:"last_used,omitempty"`
 }
 
 // TemplateRegistry manages template metadata in a thread-safe manner.

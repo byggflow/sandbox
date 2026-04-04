@@ -98,6 +98,12 @@ func Exec(raw json.RawMessage) (interface{}, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", p.Command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Kill the entire process group when the context is cancelled,
+	// so child processes don't survive the parent.
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	if p.Cwd != "" {
 		cmd.Dir = p.Cwd
 	}
@@ -149,6 +155,7 @@ func (m *Manager) Spawn(raw json.RawMessage, conn Conn) (interface{}, error) {
 	}
 
 	cmd := exec.Command("sh", "-c", p.Command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if p.Cwd != "" {
 		cmd.Dir = p.Cwd
 	}
@@ -271,18 +278,66 @@ func (m *Manager) Signal(raw json.RawMessage) (interface{}, error) {
 		return nil, fmt.Errorf("unsupported signal: %s", p.Signal)
 	}
 
-	if err := sp.cmd.Process.Signal(sig); err != nil {
+	// Send to the entire process group so child processes are also signaled.
+	if err := syscall.Kill(-sp.cmd.Process.Pid, sig.(syscall.Signal)); err != nil {
 		return nil, fmt.Errorf("signal: %w", err)
 	}
 
 	return map[string]interface{}{"success": true}, nil
 }
 
+// Cleanup kills all spawned process groups.
+func (m *Manager) Cleanup() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for pid, sp := range m.procs {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		sp.stdin.Close()
+	}
+	m.procs = make(map[int]*SpawnedProcess)
+}
+
+// maxSpawnOutput is the maximum bytes streamed per spawn/stdout or spawn/stderr
+// before output is truncated. Prevents unbounded memory and bandwidth usage.
+const maxSpawnOutput = 10 * 1024 * 1024 // 10MB
+
 func streamOutput(conn Conn, pid int, method string, r io.Reader) {
 	buf := make([]byte, 4096)
+	var totalBytes int64
+	truncated := false
+
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
+			if truncated {
+				// Drain the reader but don't send anything.
+				if err != nil {
+					break
+				}
+				continue
+			}
+
+			totalBytes += int64(n)
+			if totalBytes > int64(maxSpawnOutput) {
+				truncated = true
+				// Send truncation notification.
+				notif := proto.Notification{
+					JSONRPC: "2.0",
+					Method:  "process.output_truncated",
+					Params: map[string]interface{}{
+						"pid":    pid,
+						"stream": method,
+						"limit":  maxSpawnOutput,
+					},
+				}
+				codec.WriteJSON(conn, notif)
+				if err != nil {
+					break
+				}
+				continue
+			}
+
 			encoded := base64.StdEncoding.EncodeToString(buf[:n])
 			notif := proto.Notification{
 				JSONRPC: "2.0",
