@@ -25,6 +25,7 @@ type ServerConfig struct {
 	DataDir        string `toml:"data_dir"`
 	IdentityHeader string `toml:"identity_header"`
 	SystemIdentity string `toml:"system_identity"`
+	NodeID         string `toml:"node_id"`  // Short identifier for this node, embedded in sandbox IDs (e.g. "eu1", "us2a").
 }
 
 // LimitsConfig holds resource limit settings.

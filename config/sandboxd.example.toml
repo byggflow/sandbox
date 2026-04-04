@@ -6,6 +6,7 @@
 socket = "/var/run/sandboxd/sandboxd.sock"
 tcp = ""                          # empty = disabled, "0.0.0.0:7522" to enable
 data_dir = "/var/lib/sandboxd"
+node_id = ""                      # short node tag embedded in sandbox IDs (e.g. "eu1" → sbx-eu1-a3f2c1)
 
 # If set, sandboxd reads this header to scope sandboxes and templates
 # per identity. If empty, all resources are unscoped (single-user mode).

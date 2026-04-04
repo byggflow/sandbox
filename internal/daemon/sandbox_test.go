@@ -8,7 +8,8 @@ import (
 )
 
 func TestGenerateID(t *testing.T) {
-	id, err := GenerateID()
+	// Without node ID.
+	id, err := GenerateID("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -17,6 +18,19 @@ func TestGenerateID(t *testing.T) {
 	}
 	if len(id) != 12 { // "sbx-" + 8 hex chars
 		t.Errorf("expected length 12, got %d (%s)", len(id), id)
+	}
+
+	// With node ID.
+	id2, err := GenerateID("eu1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasPrefix(id2, "sbx-eu1-") {
+		t.Errorf("expected prefix sbx-eu1-, got %s", id2)
+	}
+	// "sbx-eu1-" (8) + 8 hex chars = 16
+	if len(id2) != 16 {
+		t.Errorf("expected length 16, got %d (%s)", len(id2), id2)
 	}
 }
 

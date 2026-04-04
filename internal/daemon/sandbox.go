@@ -237,11 +237,17 @@ func (r *Registry) All() []*Sandbox {
 	return result
 }
 
-// GenerateID creates a new sandbox ID in the format sbx-{8 hex chars}.
-func GenerateID() (string, error) {
+// GenerateID creates a new sandbox ID. If nodeID is non-empty, the format is
+// sbx-{nodeID}-{8 hex}, otherwise sbx-{8 hex}. Embedding the node ID in the
+// sandbox ID lets a routing proxy parse the target node from the ID alone,
+// without a lookup table.
+func GenerateID(nodeID string) (string, error) {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate sandbox id: %w", err)
+	}
+	if nodeID != "" {
+		return "sbx-" + nodeID + "-" + hex.EncodeToString(b), nil
 	}
 	return "sbx-" + hex.EncodeToString(b), nil
 }
