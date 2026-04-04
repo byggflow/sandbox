@@ -7,10 +7,10 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from .auth import Auth, resolve_auth
+from .auth import Auth, RequestSigner, resolve_auth
 from .call import CallContext
 from .env import EnvCategory
-from .errors import ConnectionError
+from .errors import CapacityError, ConnectionError
 from .fs import FsCategory
 from .net import NetCategory
 from .process import ProcessCategory
@@ -26,7 +26,7 @@ class SandboxOptions:
 
     endpoint: str = DEFAULT_ENDPOINT
     auth: Auth = None
-    image: Optional[str] = None
+    profile: Optional[str] = None
     template: Optional[str] = None
     memory: Optional[str] = None
     cpu: Optional[float] = None
@@ -116,12 +116,17 @@ def _resolve_endpoints(endpoint: str) -> tuple[str, str]:
 async def create_sandbox(opts: Optional[SandboxOptions] = None) -> Sandbox:
     """Create a new sandbox and return a connected ``Sandbox`` instance."""
     opts = opts or SandboxOptions()
-    headers = await resolve_auth(opts.auth)
     http_base, ws_base = _resolve_endpoints(opts.endpoint)
 
+    signer = opts.auth if isinstance(opts.auth, RequestSigner) else None
+    if signer:
+        headers = await signer.resolve_for_request("POST", "/sandboxes")
+    else:
+        headers = await resolve_auth(opts.auth)
+
     body: Dict[str, Any] = {}
-    if opts.image is not None:
-        body["image"] = opts.image
+    if opts.profile is not None:
+        body["profile"] = opts.profile
     if opts.template is not None:
         body["template"] = opts.template
     if opts.memory is not None:
@@ -140,14 +145,26 @@ async def create_sandbox(opts: Optional[SandboxOptions] = None) -> Sandbox:
             headers={"Content-Type": "application/json", **headers},
         )
 
+    if response.status_code in (429, 503):
+        retry_after_str = response.headers.get("Retry-After", "60")
+        try:
+            retry_after = float(retry_after_str)
+        except ValueError:
+            retry_after = 60.0
+        raise CapacityError(response.text, retry_after)
     if response.status_code not in (200, 201):
         raise ConnectionError(f"Failed to create sandbox: {response.status_code} {response.text}")
 
     data = response.json()
     sandbox_id: str = data["id"]
 
+    ws_headers = (
+        await signer.resolve_for_request("GET", f"/sandboxes/{sandbox_id}/ws")
+        if signer
+        else headers
+    )
     ws_transport = WsTransport()
-    await ws_transport.connect(f"{ws_base}/sandboxes/{sandbox_id}/ws", headers)
+    await ws_transport.connect(f"{ws_base}/sandboxes/{sandbox_id}/ws", ws_headers)
 
     transport: RpcTransport = ws_transport
     if opts.encrypted:
@@ -164,8 +181,12 @@ async def connect_sandbox(
 ) -> Sandbox:
     """Connect to an existing sandbox by id."""
     opts = opts or ConnectOptions()
-    headers = await resolve_auth(opts.auth)
     _, ws_base = _resolve_endpoints(opts.endpoint)
+
+    if isinstance(opts.auth, RequestSigner):
+        headers = await opts.auth.resolve_for_request("GET", f"/sandboxes/{sandbox_id}/ws")
+    else:
+        headers = await resolve_auth(opts.auth)
 
     ws_transport = WsTransport()
     await ws_transport.connect(f"{ws_base}/sandboxes/{sandbox_id}/ws", headers)

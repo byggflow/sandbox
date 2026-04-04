@@ -10,7 +10,7 @@ Usage::
     await sandbox.close()
 """
 
-from .auth import Auth, resolve_auth
+from .auth import Auth, RequestSigner, SignatureAuth, resolve_auth
 from .call import CallContext, call
 from .env import EnvCategory
 from .errors import (
@@ -63,6 +63,8 @@ __all__ = [
     "WsTransport",
     # Auth
     "Auth",
+    "RequestSigner",
+    "SignatureAuth",
     "resolve_auth",
     # Errors
     "SandboxError",

@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, Optional
 
 from .errors import ConnectionError, RpcError, SessionReplacedError
 
+MAX_FRAME_SIZE = 10 * 1024 * 1024  # 10MB
+
 
 class RpcTransport(ABC):
     """Abstract base for daemon communication."""
@@ -144,6 +146,11 @@ class WsTransport(RpcTransport):
         """Send a binary WebSocket message."""
         if self._ws is None:
             raise ConnectionError("WebSocket not connected")
+        if len(data) > MAX_FRAME_SIZE:
+            raise RpcError(
+                f"frame size {len(data)} exceeds maximum {MAX_FRAME_SIZE}",
+                -32000,
+            )
         await self._ws.send(data)
 
     def on_binary(self, handler: Callable[[bytes], None]) -> None:

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from .auth import Auth, resolve_auth
+from .auth import Auth, RequestSigner, resolve_auth
 from .call import CallContext, call
 
 
@@ -43,9 +43,14 @@ class TemplateManager:
             return "http://localhost:7522"
         return self._endpoint.rstrip("/")
 
+    async def _resolve_headers(self, method: str, path: str) -> Dict[str, str]:
+        if isinstance(self._auth, RequestSigner):
+            return await self._auth.resolve_for_request(method, path)
+        return await resolve_auth(self._auth)
+
     async def list(self) -> List[Dict[str, Any]]:
         """List available templates."""
-        headers = await resolve_auth(self._auth)
+        headers = await self._resolve_headers("GET", "/templates")
         http_base = self._resolve_http()
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{http_base}/templates", headers=headers)
@@ -54,7 +59,7 @@ class TemplateManager:
 
     async def get(self, template_id: str) -> Dict[str, Any]:
         """Get a template by id."""
-        headers = await resolve_auth(self._auth)
+        headers = await self._resolve_headers("GET", f"/templates/{template_id}")
         http_base = self._resolve_http()
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{http_base}/templates/{template_id}", headers=headers)
@@ -63,7 +68,7 @@ class TemplateManager:
 
     async def delete(self, template_id: str) -> None:
         """Delete a template by id."""
-        headers = await resolve_auth(self._auth)
+        headers = await self._resolve_headers("DELETE", f"/templates/{template_id}")
         http_base = self._resolve_http()
         async with httpx.AsyncClient() as client:
             response = await client.delete(f"{http_base}/templates/{template_id}", headers=headers)

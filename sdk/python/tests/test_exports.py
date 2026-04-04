@@ -61,7 +61,7 @@ def test_sandbox_options_defaults():
     opts = SandboxOptions()
     assert opts.endpoint == "unix:///var/run/sandboxd/sandboxd.sock"
     assert opts.auth is None
-    assert opts.image is None
+    assert opts.profile is None
     assert opts.encrypted is False
 
 
