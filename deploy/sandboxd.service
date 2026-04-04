@@ -1,0 +1,27 @@
+[Unit]
+Description=sandboxd - Sandbox Daemon
+Documentation=https://github.com/byggflow/sandbox
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sandboxd --config /etc/sandboxd/config.toml
+Restart=on-failure
+RestartSec=5
+User=root
+LimitNOFILE=65536
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sandboxd
+
+# Security hardening (while still allowing Docker socket access)
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
