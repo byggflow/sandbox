@@ -1,0 +1,9 @@
+.git
+bin/
+node_modules/
+sdk/typescript/node_modules/
+sdk/python/__pycache__/
+sdk/python/.pytest_cache/
+*.egg-info
+.DS_Store
+bun.lock

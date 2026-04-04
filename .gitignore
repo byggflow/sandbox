@@ -1,0 +1,48 @@
+# Go
+bin/
+*.exe
+*.test
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Dependencies
+node_modules
+
+# Output
+out
+dist
+*.tgz
+
+# Code coverage
+coverage
+*.lcov
+htmlcov/
+
+# Logs
+logs
+*.log
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# dotenv
+.env
+.env.*.local
+
+# Caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IDEs
+.idea
+.vscode
+
+# macOS
+.DS_Store
