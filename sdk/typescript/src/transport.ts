@@ -15,6 +15,8 @@ interface PendingRequest {
   reject: (reason: unknown) => void;
 }
 
+const MAX_FRAME_SIZE = 10 * 1024 * 1024; // 10MB
+
 export class WsTransport implements RpcTransport {
   private ws: WebSocket | null = null;
   private nextId = 1;
@@ -132,6 +134,9 @@ export class WsTransport implements RpcTransport {
   sendBinary(data: Uint8Array): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new ConnectionError("WebSocket not connected");
+    }
+    if (data.byteLength > MAX_FRAME_SIZE) {
+      throw new RpcError(`frame size ${data.byteLength} exceeds maximum ${MAX_FRAME_SIZE}`, -32000);
     }
     this.ws.send(data);
   }

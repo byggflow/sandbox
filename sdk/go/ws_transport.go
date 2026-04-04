@@ -97,8 +97,8 @@ func dialWS(ctx context.Context, url string, headers map[string]string) (*wsTran
 		}}
 	}
 
-	// Increase read limit for large binary transfers.
-	conn.SetReadLimit(64 * 1024 * 1024) // 64MB
+	// Match the daemon's MaxFrameSize protocol limit.
+	conn.SetReadLimit(10 * 1024 * 1024) // 10MB
 
 	t := &wsTransport{
 		conn:    conn,
