@@ -12,10 +12,19 @@ import (
 
 // Config is the top-level sandboxd configuration.
 type Config struct {
-	Server  ServerConfig  `toml:"server"`
-	Limits  LimitsConfig  `toml:"limits"`
-	Network NetworkConfig `toml:"network"`
-	Pool    PoolConfig    `toml:"pool"`
+	Server      ServerConfig      `toml:"server"`
+	MultiTenant MultiTenantConfig `toml:"multi_tenant"`
+	Limits      LimitsConfig      `toml:"limits"`
+	Network     NetworkConfig     `toml:"network"`
+	Pool        PoolConfig        `toml:"pool"`
+}
+
+// MultiTenantConfig enables cryptographic identity verification.
+// When enabled, all requests (except health/metrics) must carry a valid
+// Ed25519 signature from the proxy over the identity and limit headers.
+type MultiTenantConfig struct {
+	Enabled   bool   `toml:"enabled"`
+	PublicKey string `toml:"public_key"` // Base64-encoded Ed25519 public key.
 }
 
 // ServerConfig holds listener and data directory settings.
@@ -151,6 +160,9 @@ func Load(path string) (Config, error) {
 func (c *Config) validate() error {
 	if c.Server.Socket == "" {
 		return fmt.Errorf("server.socket is required")
+	}
+	if c.MultiTenant.Enabled && c.MultiTenant.PublicKey == "" {
+		return fmt.Errorf("multi_tenant.public_key is required when multi_tenant.enabled = true")
 	}
 	if c.Limits.MaxSandboxes <= 0 {
 		return fmt.Errorf("limits.max_sandboxes must be positive")

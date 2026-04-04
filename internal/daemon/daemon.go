@@ -27,6 +27,7 @@ type Daemon struct {
 	Server    *Server
 	Metrics   *Metrics
 	Events    *EventBus
+	Verifier  *identity.Verifier // Non-nil when multi-tenant mode is enabled.
 	Log       *slog.Logger
 
 	networkID string
@@ -49,10 +50,19 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		Registry:  NewRegistry(),
 		Templates: NewTemplateRegistry(),
 		Metrics:   NewMetrics(),
-		Events:  NewEventBus(0),
-		Log:     log,
-		ctx:     ctx,
-		cancel:  cancel,
+		Events:    NewEventBus(0),
+		Log:       log,
+		ctx:       ctx,
+		cancel:    cancel,
+	}
+
+	if cfg.MultiTenant.Enabled {
+		v, err := identity.NewVerifier(cfg.MultiTenant.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("multi-tenant verifier: %w", err)
+		}
+		d.Verifier = v
+		log.Info("multi-tenant mode enabled with Ed25519 signature verification")
 	}
 
 	return d, nil

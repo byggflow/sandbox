@@ -19,26 +19,49 @@ import (
 
 // registerRoutes sets up all HTTP handlers on the mux.
 func registerRoutes(mux *http.ServeMux, d *Daemon) {
-	mux.HandleFunc("POST /sandboxes", d.handleCreateSandbox)
-	mux.HandleFunc("GET /sandboxes", d.handleListSandboxes)
-	mux.HandleFunc("DELETE /sandboxes/{id}", d.handleDestroySandbox)
-	mux.HandleFunc("GET /sandboxes/{id}/stats", d.handleSandboxStats)
-	mux.HandleFunc("GET /sandboxes/{id}/ws", d.handleSandboxWS)
+	// Tenant-authenticated routes: require valid signature in multi-tenant mode.
+	tenant := d.tenantAuth
 
-	mux.HandleFunc("POST /templates", d.handleCreateTemplate)
-	mux.HandleFunc("GET /templates", d.handleListTemplates)
-	mux.HandleFunc("GET /templates/{id}", d.handleGetTemplate)
-	mux.HandleFunc("DELETE /templates/{id}", d.handleDeleteTemplate)
+	mux.HandleFunc("POST /sandboxes", tenant(d.handleCreateSandbox))
+	mux.HandleFunc("GET /sandboxes", tenant(d.handleListSandboxes))
+	mux.HandleFunc("DELETE /sandboxes/{id}", tenant(d.handleDestroySandbox))
+	mux.HandleFunc("GET /sandboxes/{id}/stats", tenant(d.handleSandboxStats))
+	mux.HandleFunc("GET /sandboxes/{id}/ws", tenant(d.handleSandboxWS))
 
-	mux.HandleFunc("GET /pools", d.handlePoolStatus)
-	mux.HandleFunc("PUT /pools/{profile}", d.handlePoolResize)
-	mux.HandleFunc("POST /pools/{profile}/flush", d.handlePoolFlush)
+	mux.HandleFunc("POST /templates", tenant(d.handleCreateTemplate))
+	mux.HandleFunc("GET /templates", tenant(d.handleListTemplates))
+	mux.HandleFunc("GET /templates/{id}", tenant(d.handleGetTemplate))
+	mux.HandleFunc("DELETE /templates/{id}", tenant(d.handleDeleteTemplate))
 
-	mux.HandleFunc("GET /events", d.handleEvents)
-	mux.HandleFunc("GET /events/history", d.handleEventsHistory)
+	mux.HandleFunc("GET /pools", tenant(d.handlePoolStatus))
+	mux.HandleFunc("PUT /pools/{profile}", tenant(d.handlePoolResize))
+	mux.HandleFunc("POST /pools/{profile}/flush", tenant(d.handlePoolFlush))
 
+	mux.HandleFunc("GET /events", tenant(d.handleEvents))
+	mux.HandleFunc("GET /events/history", tenant(d.handleEventsHistory))
+
+	// Operational endpoints — no auth required.
 	mux.HandleFunc("GET /health", d.handleHealth)
 	mux.HandleFunc("GET /metrics", d.handleMetrics)
+}
+
+// tenantAuth is middleware that verifies Ed25519 signatures on identity headers
+// when multi-tenant mode is enabled. In single-user mode it's a no-op passthrough.
+func (d *Daemon) tenantAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if d.Verifier != nil {
+			if err := d.Verifier.Verify(r); err != nil {
+				writeError(w, http.StatusUnauthorized, fmt.Sprintf("signature verification failed: %v", err))
+				return
+			}
+			// In multi-tenant mode, identity is required.
+			if r.Header.Get(identity.Header) == "" {
+				writeError(w, http.StatusUnauthorized, "X-Sandbox-Identity header required")
+				return
+			}
+		}
+		next(w, r)
+	}
 }
 
 func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {

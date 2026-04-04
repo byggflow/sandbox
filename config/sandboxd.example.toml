@@ -8,16 +8,23 @@ tcp = ""                          # empty = disabled, "0.0.0.0:7522" to enable
 data_dir = "/var/lib/sandboxd"
 node_id = ""                      # short node tag embedded in sandbox IDs (e.g. "eu1" → sbx-eu1-a3f2c1)
 
-# Multi-tenant mode is activated automatically when requests include the
-# X-Sandbox-Identity header (typically set by a proxy). Per-identity limits
-# are set via request headers, not config:
+# Multi-tenant mode: when enabled, all API requests (except /health and
+# /metrics) must carry a valid Ed25519 signature proving the identity and
+# limit headers were set by a trusted proxy.
 #
-#   X-Sandbox-Identity:      the caller's identity
+# The proxy signs these headers with its private key:
+#   X-Sandbox-Identity:       the caller's identity
 #   X-Sandbox-Max-Concurrent: max concurrent sandboxes for this identity
-#   X-Sandbox-Max-TTL:        max session TTL in seconds for this identity
+#   X-Sandbox-Max-TTL:        max session TTL in seconds
 #   X-Sandbox-Max-Templates:  max templates for this identity
+#   X-Sandbox-Signature:      base64 Ed25519 signature over the above
 #
-# Global config limits below act as hard ceilings that headers cannot exceed.
+# Generate a keypair:  openssl genpkey -algorithm ed25519 -out proxy.pem
+#                       openssl pkey -in proxy.pem -pubout -outform DER | base64
+
+[multi_tenant]
+enabled = false
+public_key = ""                   # base64-encoded Ed25519 public key from the proxy
 
 [limits]
 max_sandboxes = 100

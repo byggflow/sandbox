@@ -1,6 +1,8 @@
 package identity
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"net/http/httptest"
 	"testing"
 )
@@ -81,4 +83,157 @@ func TestExtractLimits(t *testing.T) {
 			t.Errorf("expected 0 for invalid value, got %d", lim.MaxConcurrent)
 		}
 	})
+}
+
+// generateTestKeypair creates an Ed25519 keypair for testing.
+func generateTestKeypair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub, priv
+}
+
+func TestNewVerifier(t *testing.T) {
+	pub, _ := generateTestKeypair(t)
+
+	t.Run("valid key", func(t *testing.T) {
+		b64 := base64.StdEncoding.EncodeToString(pub)
+		v, err := NewVerifier(b64)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if v == nil {
+			t.Fatal("expected non-nil verifier")
+		}
+	})
+
+	t.Run("invalid base64", func(t *testing.T) {
+		_, err := NewVerifier("not-valid-base64!!!")
+		if err == nil {
+			t.Error("expected error")
+		}
+	})
+
+	t.Run("wrong key size", func(t *testing.T) {
+		_, err := NewVerifier(base64.StdEncoding.EncodeToString([]byte("tooshort")))
+		if err == nil {
+			t.Error("expected error for wrong key size")
+		}
+	})
+}
+
+func TestVerifyValidSignature(t *testing.T) {
+	pub, priv := generateTestKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	v, err := NewVerifier(b64)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+	req.Header.Set(HeaderMaxConcurrent, "50")
+	req.Header.Set(HeaderMaxTTL, "86400")
+
+	// Sign the request.
+	sig := Sign(priv, req)
+	req.Header.Set(HeaderSignature, sig)
+
+	if err := v.Verify(req); err != nil {
+		t.Errorf("expected valid signature, got: %v", err)
+	}
+}
+
+func TestVerifyTamperedHeader(t *testing.T) {
+	pub, priv := generateTestKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	v, _ := NewVerifier(b64)
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+	req.Header.Set(HeaderMaxConcurrent, "50")
+
+	sig := Sign(priv, req)
+	req.Header.Set(HeaderSignature, sig)
+
+	// Tamper with the identity after signing.
+	req.Header.Set(Header, "cust_evil")
+
+	if err := v.Verify(req); err == nil {
+		t.Error("expected signature verification to fail after tampering")
+	}
+}
+
+func TestVerifyTamperedLimits(t *testing.T) {
+	pub, priv := generateTestKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	v, _ := NewVerifier(b64)
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+	req.Header.Set(HeaderMaxConcurrent, "5")
+
+	sig := Sign(priv, req)
+	req.Header.Set(HeaderSignature, sig)
+
+	// Tamper with the limit after signing.
+	req.Header.Set(HeaderMaxConcurrent, "999999")
+
+	if err := v.Verify(req); err == nil {
+		t.Error("expected signature verification to fail after limit tampering")
+	}
+}
+
+func TestVerifyMissingSignature(t *testing.T) {
+	pub, _ := generateTestKeypair(t)
+	b64 := base64.StdEncoding.EncodeToString(pub)
+	v, _ := NewVerifier(b64)
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+
+	if err := v.Verify(req); err == nil {
+		t.Error("expected error for missing signature")
+	}
+}
+
+func TestVerifyWrongKey(t *testing.T) {
+	pub1, _ := generateTestKeypair(t)
+	_, priv2 := generateTestKeypair(t)
+
+	b64 := base64.StdEncoding.EncodeToString(pub1)
+	v, _ := NewVerifier(b64)
+
+	req := httptest.NewRequest("POST", "/sandboxes", nil)
+	req.Header.Set(Header, "cust_123")
+
+	// Sign with a different private key.
+	sig := Sign(priv2, req)
+	req.Header.Set(HeaderSignature, sig)
+
+	if err := v.Verify(req); err == nil {
+		t.Error("expected error when signed with wrong key")
+	}
+}
+
+func TestSignDeterministic(t *testing.T) {
+	_, priv := generateTestKeypair(t)
+
+	req1 := httptest.NewRequest("POST", "/sandboxes", nil)
+	req1.Header.Set(Header, "cust_123")
+	req1.Header.Set(HeaderMaxConcurrent, "5")
+
+	req2 := httptest.NewRequest("POST", "/sandboxes", nil)
+	req2.Header.Set(Header, "cust_123")
+	req2.Header.Set(HeaderMaxConcurrent, "5")
+
+	sig1 := Sign(priv, req1)
+	sig2 := Sign(priv, req2)
+
+	// Ed25519 signatures are deterministic.
+	if sig1 != sig2 {
+		t.Error("expected identical signatures for identical headers")
+	}
 }
