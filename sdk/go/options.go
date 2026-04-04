@@ -19,6 +19,8 @@ type Options struct {
 	CPU float64
 	// TTL is the time-to-live in seconds.
 	TTL int
+	// Labels is a set of user-defined key-value metadata for the sandbox.
+	Labels map[string]string
 	// Encrypted enables end-to-end encryption.
 	Encrypted bool
 }

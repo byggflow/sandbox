@@ -22,6 +22,18 @@ import (
 	"strings"
 )
 
+// SandboxStats contains resource usage statistics for a sandbox.
+type SandboxStats struct {
+	CPUPercent       float64 `json:"cpu_percent"`
+	MemoryUsageBytes uint64  `json:"memory_usage_bytes"`
+	MemoryLimitBytes uint64  `json:"memory_limit_bytes"`
+	MemoryPercent    float64 `json:"memory_percent"`
+	NetworkRxBytes   uint64  `json:"network_rx_bytes"`
+	NetworkTxBytes   uint64  `json:"network_tx_bytes"`
+	PIDs             uint64  `json:"pids"`
+	UptimeSeconds    float64 `json:"uptime_seconds"`
+}
+
 // Sandbox represents a connected sandbox instance.
 type Sandbox struct {
 	// ID is the unique identifier for this sandbox (e.g., "sbx-a1b2c3").
@@ -29,6 +41,11 @@ type Sandbox struct {
 
 	cc        *callContext
 	transport RpcTransport
+
+	// HTTP fields for REST endpoints (e.g., stats).
+	httpClient  *http.Client
+	httpBaseURL string
+	authHeaders map[string]string
 }
 
 // FS returns the filesystem category for this sandbox.
@@ -62,6 +79,39 @@ func (s *Sandbox) Close() error {
 		return s.transport.Close()
 	}
 	return nil
+}
+
+// Stats returns resource usage statistics for this sandbox.
+// This calls the REST endpoint GET /sandboxes/{id}/stats.
+func (s *Sandbox) Stats(ctx context.Context) (*SandboxStats, error) {
+	if s.httpClient == nil {
+		return nil, fmt.Errorf("sandbox: http client not configured")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.httpBaseURL+"/sandboxes/"+s.ID+"/stats", nil)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: build stats request: %w", err)
+	}
+	for k, v := range s.authHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: stats request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sandbox: stats failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var stats SandboxStats
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return nil, fmt.Errorf("sandbox: decode stats response: %w", err)
+	}
+	return &stats, nil
 }
 
 // httpClientForEndpoint returns an HTTP client configured for the endpoint.
@@ -137,6 +187,9 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 		if opts.TTL > 0 {
 			body["ttl"] = opts.TTL
 		}
+		if len(opts.Labels) > 0 {
+			body["labels"] = opts.Labels
+		}
 	}
 
 	bodyJSON, err := json.Marshal(body)
@@ -201,6 +254,9 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 			transport: transport,
 			sandboxID: info.ID,
 		},
+		httpClient:  client,
+		httpBaseURL: baseURL,
+		authHeaders: headers,
 	}
 	return sbx, nil
 }
@@ -237,6 +293,9 @@ func Connect(ctx context.Context, id string, opts *ConnectOptions) (*Sandbox, er
 		return nil, fmt.Errorf("sandbox: auth resolve: %w", err)
 	}
 
+	// Prepare HTTP client for REST endpoints.
+	httpClient, httpBaseURL := httpClientForEndpoint(endpoint)
+
 	// Connect WebSocket to the sandbox.
 	wsURL := buildWSURL(endpoint, id)
 	wsTransport, err := dialWS(ctx, wsURL, headers)
@@ -263,6 +322,9 @@ func Connect(ctx context.Context, id string, opts *ConnectOptions) (*Sandbox, er
 			transport: transport,
 			sandboxID: id,
 		},
+		httpClient:  httpClient,
+		httpBaseURL: httpBaseURL,
+		authHeaders: headers,
 	}
 	return sbx, nil
 }

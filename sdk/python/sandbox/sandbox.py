@@ -31,6 +31,7 @@ class SandboxOptions:
     memory: Optional[str] = None
     cpu: Optional[float] = None
     ttl: Optional[int] = None
+    labels: Optional[Dict[str, str]] = None
     encrypted: bool = False
 
 
@@ -129,6 +130,8 @@ async def create_sandbox(opts: Optional[SandboxOptions] = None) -> Sandbox:
         body["cpu"] = opts.cpu
     if opts.ttl is not None:
         body["ttl"] = opts.ttl
+    if opts.labels is not None:
+        body["labels"] = opts.labels
 
     async with httpx.AsyncClient() as client:
         response = await client.post(

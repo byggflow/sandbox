@@ -27,6 +27,7 @@ type Daemon struct {
 	Identity  *identity.Extractor
 	Server    *Server
 	Metrics   *Metrics
+	Events    *EventBus
 	Log       *slog.Logger
 
 	networkID string
@@ -53,6 +54,7 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 			SystemIdentity: cfg.Server.SystemIdentity,
 		},
 		Metrics: NewMetrics(),
+		Events:  NewEventBus(),
 		Log:     log,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -160,6 +162,13 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		return nil, ErrAtCapacity
 	}
 
+	// Check per-identity sandbox limit.
+	if d.Config.Limits.MaxSandboxesPerIdentity > 0 && !id.Empty() {
+		if d.Registry.CountByIdentity(id.Value) >= d.Config.Limits.MaxSandboxesPerIdentity {
+			return nil, ErrIdentityQuotaExceeded
+		}
+	}
+
 	// Determine image and resource config.
 	image := req.Image
 	profile := req.Profile
@@ -257,12 +266,19 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 				CPU:         cpu,
 				Profile:     profile,
 				Template:    templateID,
+				Labels:      req.Labels,
 				Buffer:      NewNotificationBuffer(),
 			}
 			if err := d.Registry.Add(sbx); err != nil {
 				return nil, err
 			}
 			d.Metrics.IncCreateWarm()
+			d.publishSandboxEvent("sandbox.created", sbx, map[string]interface{}{
+				"image":   image,
+				"profile": profile,
+				"labels":  req.Labels,
+				"method":  "warm",
+			})
 			d.Log.Info("sandbox created (warm)", "id", sbxID, "container", warm.ContainerID[:12])
 			return sbx, nil
 		}
@@ -289,6 +305,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		CPU:         cpu,
 		Profile:     profile,
 		Template:    templateID,
+		Labels:      req.Labels,
 		Buffer:      NewNotificationBuffer(),
 	}
 	if err := d.Registry.Add(sbx); err != nil {
@@ -296,6 +313,12 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	}
 
 	d.Metrics.IncCreateCold()
+	d.publishSandboxEvent("sandbox.created", sbx, map[string]interface{}{
+		"image":   image,
+		"profile": profile,
+		"labels":  req.Labels,
+		"method":  "cold",
+	})
 	d.Log.Info("sandbox created (cold)", "id", sbxID, "container", containerID[:12])
 	return sbx, nil
 }
@@ -304,6 +327,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 func (d *Daemon) DestroySandbox(ctx context.Context, sbx *Sandbox) error {
 	sbx.CancelReaper()
 	d.Metrics.IncDestroy()
+	d.publishSandboxEvent("sandbox.destroyed", sbx, nil)
 	return d.destroySandbox(ctx, sbx)
 }
 
@@ -356,6 +380,9 @@ func (d *Daemon) HandleDisconnect(sbx *Sandbox) {
 	sbx.DisconnectedAt = time.Now()
 	sbx.mu.Unlock()
 
+	d.publishSandboxEvent("sandbox.disconnected", sbx, map[string]interface{}{
+		"ttl": ttl,
+	})
 	d.Log.Info("sandbox disconnected, starting TTL reaper", "id", sbx.ID, "ttl", ttl)
 
 	// Start reaper.
@@ -566,12 +593,13 @@ func parseByteSize(s string) (int64, error) {
 
 // CreateRequest is the request body for POST /sandboxes.
 type CreateRequest struct {
-	Image    string  `json:"image"`
-	Profile  string  `json:"profile"`
-	Template string  `json:"template"`
-	Memory   string  `json:"memory"`
-	CPU      float64 `json:"cpu"`
-	TTL      int     `json:"ttl"`
+	Image    string            `json:"image"`
+	Profile  string            `json:"profile"`
+	Template string            `json:"template"`
+	Memory   string            `json:"memory"`
+	CPU      float64           `json:"cpu"`
+	TTL      int               `json:"ttl"`
+	Labels   map[string]string `json:"labels"`
 }
 
 // CreateTemplateRequest is the request body for POST /templates.
@@ -582,3 +610,6 @@ type CreateTemplateRequest struct {
 
 // ErrAtCapacity indicates the sandbox limit has been reached.
 var ErrAtCapacity = fmt.Errorf("at capacity")
+
+// ErrIdentityQuotaExceeded indicates the per-identity sandbox limit has been reached.
+var ErrIdentityQuotaExceeded = fmt.Errorf("identity quota exceeded")

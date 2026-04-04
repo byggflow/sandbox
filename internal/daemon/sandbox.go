@@ -37,6 +37,7 @@ type Sandbox struct {
 	CPU         float64           `json:"-"`
 	Profile     string            `json:"profile,omitempty"`
 	Template    string            `json:"template,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
 
 	// Session tracking.
 	Session *proxy.Session `json:"-"`
@@ -56,13 +57,14 @@ type Sandbox struct {
 
 // SandboxInfo is the JSON-serializable sandbox information returned by the API.
 type SandboxInfo struct {
-	ID       string       `json:"id"`
-	Image    string       `json:"image"`
-	State    SandboxState `json:"state"`
-	Created  time.Time    `json:"created"`
-	TTL      int          `json:"ttl"`
-	Profile  string       `json:"profile,omitempty"`
-	Template string       `json:"template,omitempty"`
+	ID       string            `json:"id"`
+	Image    string            `json:"image"`
+	State    SandboxState      `json:"state"`
+	Created  time.Time         `json:"created"`
+	TTL      int               `json:"ttl"`
+	Profile  string            `json:"profile,omitempty"`
+	Template string            `json:"template,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
 }
 
 // Info returns the public API representation of the sandbox.
@@ -77,6 +79,7 @@ func (s *Sandbox) Info() SandboxInfo {
 		TTL:      s.TTL,
 		Profile:  s.Profile,
 		Template: s.Template,
+		Labels:   s.Labels,
 	}
 }
 
@@ -200,6 +203,20 @@ func (r *Registry) List(id identity.Identity) []*Sandbox {
 		}
 	}
 	return result
+}
+
+// CountByIdentity returns the number of sandboxes belonging to the given identity.
+func (r *Registry) CountByIdentity(identity string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	count := 0
+	for _, sbx := range r.sandboxes {
+		if sbx.IdentityStr == identity {
+			count++
+		}
+	}
+	return count
 }
 
 // Count returns the total number of registered sandboxes.

@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/docker/docker/api/types/container"
 
 	"github.com/byggflow/sandbox/internal/proxy"
 	"github.com/byggflow/sandbox/protocol"
@@ -18,6 +21,7 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 	mux.HandleFunc("POST /sandboxes", d.handleCreateSandbox)
 	mux.HandleFunc("GET /sandboxes", d.handleListSandboxes)
 	mux.HandleFunc("DELETE /sandboxes/{id}", d.handleDestroySandbox)
+	mux.HandleFunc("GET /sandboxes/{id}/stats", d.handleSandboxStats)
 	mux.HandleFunc("GET /sandboxes/{id}/ws", d.handleSandboxWS)
 
 	mux.HandleFunc("POST /templates", d.handleCreateTemplate)
@@ -28,6 +32,8 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 	mux.HandleFunc("GET /pools", d.handlePoolStatus)
 	mux.HandleFunc("PUT /pools/{profile}", d.handlePoolResize)
 	mux.HandleFunc("POST /pools/{profile}/flush", d.handlePoolFlush)
+
+	mux.HandleFunc("GET /events", d.handleEvents)
 
 	mux.HandleFunc("GET /health", d.handleHealth)
 	mux.HandleFunc("GET /metrics", d.handleMetrics)
@@ -57,6 +63,11 @@ func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "at capacity")
 			return
 		}
+		if err == ErrIdentityQuotaExceeded {
+			w.Header().Set("Retry-After", "2")
+			writeError(w, http.StatusTooManyRequests, "identity sandbox quota exceeded")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -71,9 +82,34 @@ func (d *Daemon) handleListSandboxes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse label filters from query parameters.
+	// Format: ?label=key:value — multiple label params act as AND filter.
+	labelFilters := map[string]string{}
+	for _, lbl := range r.URL.Query()["label"] {
+		parts := strings.SplitN(lbl, ":", 2)
+		if len(parts) == 2 {
+			labelFilters[parts[0]] = parts[1]
+		}
+	}
+
 	sandboxes := d.Registry.List(id)
 	infos := make([]SandboxInfo, 0, len(sandboxes))
 	for _, sbx := range sandboxes {
+		if len(labelFilters) > 0 {
+			sbx.mu.Lock()
+			labels := sbx.Labels
+			sbx.mu.Unlock()
+			match := true
+			for k, v := range labelFilters {
+				if labels[k] != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
 		infos = append(infos, sbx.Info())
 	}
 
@@ -111,6 +147,103 @@ func (d *Daemon) handleDestroySandbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// SandboxStats is the JSON response for GET /sandboxes/{id}/stats.
+type SandboxStats struct {
+	CPUPercent       float64 `json:"cpu_percent"`
+	MemoryUsageBytes uint64  `json:"memory_usage_bytes"`
+	MemoryLimitBytes uint64  `json:"memory_limit_bytes"`
+	MemoryPercent    float64 `json:"memory_percent"`
+	NetworkRxBytes   uint64  `json:"network_rx_bytes"`
+	NetworkTxBytes   uint64  `json:"network_tx_bytes"`
+	PIDs             uint64  `json:"pids"`
+	UptimeSeconds    float64 `json:"uptime_seconds"`
+}
+
+func (d *Daemon) handleSandboxStats(w http.ResponseWriter, r *http.Request) {
+	sbxID := r.PathValue("id")
+	if sbxID == "" {
+		writeError(w, http.StatusBadRequest, "sandbox id required")
+		return
+	}
+
+	id := d.Identity.Extract(r)
+	if d.Identity.Required() && id.Empty() {
+		writeError(w, http.StatusUnauthorized, "identity required")
+		return
+	}
+
+	sbx, ok := d.Registry.Get(sbxID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+
+	if d.Identity.Required() && !sbx.Identity.Matches(id) {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return
+	}
+
+	// One-shot container stats from Docker.
+	statsResp, err := d.Docker.ContainerStatsOneShot(r.Context(), sbx.ContainerID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("docker stats: %v", err))
+		return
+	}
+	defer statsResp.Body.Close()
+
+	var dockerStats container.StatsResponse
+	if err := json.NewDecoder(statsResp.Body).Decode(&dockerStats); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("decode stats: %v", err))
+		return
+	}
+
+	// Calculate CPU percentage.
+	cpuPercent := 0.0
+	cpuDelta := float64(dockerStats.CPUStats.CPUUsage.TotalUsage) - float64(dockerStats.PreCPUStats.CPUUsage.TotalUsage)
+	systemDelta := float64(dockerStats.CPUStats.SystemUsage) - float64(dockerStats.PreCPUStats.SystemUsage)
+	if systemDelta > 0 && cpuDelta >= 0 {
+		onlineCPUs := float64(dockerStats.CPUStats.OnlineCPUs)
+		if onlineCPUs == 0 {
+			onlineCPUs = 1
+		}
+		cpuPercent = (cpuDelta / systemDelta) * onlineCPUs * 100.0
+		cpuPercent = math.Round(cpuPercent*100) / 100
+	}
+
+	// Memory.
+	memUsage := dockerStats.MemoryStats.Usage
+	memLimit := dockerStats.MemoryStats.Limit
+	memPercent := 0.0
+	if memLimit > 0 {
+		memPercent = float64(memUsage) / float64(memLimit) * 100.0
+		memPercent = math.Round(memPercent*100) / 100
+	}
+
+	// Network: sum all interfaces.
+	var netRx, netTx uint64
+	for _, ns := range dockerStats.Networks {
+		netRx += ns.RxBytes
+		netTx += ns.TxBytes
+	}
+
+	// Uptime from sandbox creation time.
+	uptimeSeconds := time.Since(sbx.Created).Seconds()
+	uptimeSeconds = math.Round(uptimeSeconds*100) / 100
+
+	stats := SandboxStats{
+		CPUPercent:       cpuPercent,
+		MemoryUsageBytes: memUsage,
+		MemoryLimitBytes: memLimit,
+		MemoryPercent:    memPercent,
+		NetworkRxBytes:   netRx,
+		NetworkTxBytes:   netTx,
+		PIDs:             dockerStats.PidsStats.Current,
+		UptimeSeconds:    uptimeSeconds,
+	}
+
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (d *Daemon) handleSandboxWS(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +302,9 @@ func (d *Daemon) handleSandboxWS(w http.ResponseWriter, r *http.Request) {
 		sbx.mu.Unlock()
 		sbx.CancelReaper()
 		sbx.SetState(StateRunning)
+		d.publishSandboxEvent("sandbox.reconnected", sbx, map[string]interface{}{
+			"disconnected_at": disconnectedAt.Format(time.RFC3339),
+		})
 		d.Log.Info("sandbox reconnected", "id", sbxID)
 	}
 
@@ -438,6 +574,54 @@ func (d *Daemon) handlePoolFlush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	// Optional identity filter.
+	identityFilter := r.URL.Query().Get("identity")
+
+	// Subscribe to events.
+	subID, ch := d.Events.Subscribe(64)
+	defer d.Events.Unsubscribe(subID)
+
+	// Set SSE headers.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+
+			// Filter by identity if requested.
+			if identityFilter != "" && event.Identity != identityFilter {
+				continue
+			}
+
+			data, err := json.Marshal(event)
+			if err != nil {
+				d.Log.Error("failed to marshal event", "error", err)
+				continue
+			}
+
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
 }
 
 func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {

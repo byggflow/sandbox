@@ -18,6 +18,7 @@ export interface SandboxOptions {
   memory?: string;
   cpu?: number;
   ttl?: number;
+  labels?: Record<string, string>;
   encrypted?: boolean;
 }
 
@@ -274,6 +275,7 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   if (opts?.memory) body.memory = opts.memory;
   if (opts?.cpu) body.cpu = opts.cpu;
   if (opts?.ttl) body.ttl = opts.ttl;
+  if (opts?.labels) body.labels = opts.labels;
 
   const response = await fetch(`${http}/sandboxes`, {
     method: "POST",
