@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a bug in sandboxd, sbx, or the SDKs
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear description of what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to reproduce the behavior.
+      placeholder: |
+        1. Create a sandbox with `sbx create --profile python`
+        2. Run `sbx exec <id> "..."`
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Your setup details.
+      value: |
+        - OS:
+        - Docker version:
+        - sandboxd version:
+        - SDK (language + version):
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output (sandboxd stderr, Docker logs, etc.).
+      render: shell
+    validations:
+      required: false

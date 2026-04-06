@@ -1,5 +1,9 @@
 # Sandbox
 
+[![CI](https://github.com/byggflow/sandbox/actions/workflows/ci.yml/badge.svg)](https://github.com/byggflow/sandbox/actions/workflows/ci.yml)
+[![GitHub Release](https://img.shields.io/github/v/release/byggflow/sandbox)](https://github.com/byggflow/sandbox/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 High-frequency sandboxing as a service.
 
 sandboxd is a daemon that exposes a Unix socket and makes spinning up isolated environments as cheap and fast as possible. It supports two runtime backends (Docker containers and Firecracker microVMs) with per-profile runtime selection. A warm pool of pre-created sandboxes means allocation takes single-digit milliseconds instead of seconds.
@@ -13,15 +17,45 @@ Built and maintained by [Byggflow](https://byggflow.com).
 - Running untrusted code at high frequency
 - Programmable remote machines via SDK
 
-## Quick start
+## Installation
 
-### Prerequisites
+### Install script (recommended)
 
-- Linux host with Docker installed
-- Go 1.25+ (for building from source)
-- (Optional) Firecracker + KVM for microVM sandboxes
+```bash
+curl -fsSL https://raw.githubusercontent.com/byggflow/sandbox/main/scripts/install.sh | sh
+```
 
-### Install from source
+This installs `sandboxd` and `sbx` to `/usr/local/bin`. To install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/byggflow/sandbox/main/scripts/install.sh | sh -s -- --version v0.1.0
+```
+
+### Download binary
+
+Grab the archive for your platform from the [releases page](https://github.com/byggflow/sandbox/releases):
+
+| Platform | Download |
+|---|---|
+| Linux x86_64 | `sandbox-vX.Y.Z-linux-amd64.tar.gz` |
+| Linux ARM64 | `sandbox-vX.Y.Z-linux-arm64.tar.gz` |
+| macOS x86_64 | `sandbox-vX.Y.Z-darwin-amd64.tar.gz` |
+| macOS ARM64 | `sandbox-vX.Y.Z-darwin-arm64.tar.gz` |
+
+```bash
+tar xzf sandbox-*.tar.gz
+sudo mv sandboxd sbx /usr/local/bin/
+```
+
+### Docker
+
+```bash
+docker pull ghcr.io/byggflow/sandboxd:latest
+```
+
+### Build from source
+
+Requires Go 1.25+.
 
 ```bash
 git clone https://github.com/byggflow/sandbox.git
@@ -29,11 +63,14 @@ cd sandbox
 make build
 ```
 
-This produces three binaries in `bin/`:
+This produces three binaries in `bin/`: `sandboxd` (daemon), `sbx` (CLI), and `sandbox-agent` (guest agent baked into sandbox images).
 
-- `sandboxd` — the daemon
-- `sbx` — the CLI
-- `sandbox-agent` — the guest agent (baked into sandbox images)
+## Quick start
+
+### Prerequisites
+
+- Linux host with Docker installed
+- (Optional) Firecracker + KVM for microVM sandboxes
 
 ### Run the daemon
 
@@ -394,15 +431,15 @@ Key config sections:
 
 ## Docker images
 
-Published images in `images/`:
+Published to GitHub Container Registry:
 
 | Image | Description |
 |---|---|
-| `byggflow/sandboxd` | The daemon |
-| `byggflow/sandbox-base` | Alpine with the guest agent (default pool image) |
-| `byggflow/sandbox-full` | Ubuntu 24.04 with common dev tools |
-| `byggflow/sandbox-node` | Node.js 22 (Alpine) |
-| `byggflow/sandbox-python` | Python 3.13 (Alpine) |
+| `ghcr.io/byggflow/sandboxd` | The daemon |
+| `ghcr.io/byggflow/sandbox-base` | Alpine with the guest agent (default pool image) |
+| `ghcr.io/byggflow/sandbox-full` | Ubuntu 24.04 with common dev tools |
+| `ghcr.io/byggflow/sandbox-node` | Node.js 22 (Alpine) |
+| `ghcr.io/byggflow/sandbox-python` | Python 3.13 (Alpine) |
 
 All sandbox images include the guest agent binary. Use `pool.base.<name>.image` in the config to reference them.
 
@@ -512,14 +549,17 @@ bun install
 bunx --bun vitest run
 ```
 
+## Deployment
+
+See the [Deployment Guide](docs/deployment.md) for production setup with systemd, Docker Compose, TLS, monitoring, and multi-tenant configuration.
+
 ## Contributing
 
-Contributions are welcome. Please open an issue to discuss your idea before submitting a pull request.
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code style, testing, and PR guidelines.
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feat/my-feature`)
-3. Commit using [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, etc.)
-4. Push to your fork and open a pull request
+## Security
+
+For reporting vulnerabilities, see [SECURITY.md](SECURITY.md).
 
 ## License
 
