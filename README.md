@@ -2,7 +2,7 @@
 
 High-frequency sandboxing as a service.
 
-sandboxd is a daemon that exposes a Unix socket and makes spinning up isolated environments as cheap and fast as possible. It supports two runtime backends -- Docker containers and Firecracker microVMs -- with per-profile runtime selection. A warm pool of pre-created sandboxes means allocation takes single-digit milliseconds instead of seconds.
+sandboxd is a daemon that exposes a Unix socket and makes spinning up isolated environments as cheap and fast as possible. It supports two runtime backends (Docker containers and Firecracker microVMs) with per-profile runtime selection. A warm pool of pre-created sandboxes means allocation takes single-digit milliseconds instead of seconds.
 
 Built and maintained by [Byggflow](https://byggflow.com).
 
@@ -276,7 +276,7 @@ The daemon manages sandbox lifecycle, warm pools, WebSocket sessions, and port t
 | **Docker** (default) | Container (cgroups + namespaces) | TCP over bridge network | General purpose, fast startup |
 | **Firecracker** | microVM (KVM hardware virtualization) | vsock (AF_VSOCK) | Untrusted code, stronger isolation |
 
-Runtimes are selected per profile in the config. The SDK and API are identical regardless of backend -- callers don't need to know which runtime is in use.
+Runtimes are selected per profile in the config. The SDK and API are identical regardless of backend, so callers don't need to know which runtime is in use.
 
 All resources (sandboxes, templates, tunnels) are scoped to the caller's identity in multi-tenant mode.
 
@@ -427,7 +427,7 @@ sandboxd is designed to run untrusted code. Every sandbox is locked down by defa
 |---|---|
 | Hardware virtualization | Each sandbox is a dedicated KVM virtual machine |
 | Minimal attack surface | Firecracker has ~50k lines of Rust, no BIOS/USB/PCI |
-| vsock communication | Host-guest communication via AF_VSOCK -- no network bridge |
+| vsock communication | Host-guest communication via AF_VSOCK, no network bridge |
 | CoW rootfs | Each VM gets a copy-on-write disk image |
 | Memory and vCPU caps | Configured per-profile in the daemon config |
 
@@ -435,7 +435,7 @@ sandboxd is designed to run untrusted code. Every sandbox is locked down by defa
 
 **Docker**: Each sandbox runs on a dedicated Docker bridge network (`sandboxd-net`) with inter-container communication disabled. Sandboxes can reach the internet but cannot reach each other. The daemon communicates with agents via container IPs on the bridge -- no ports are exposed on the host.
 
-**Firecracker**: Each microVM is fully isolated at the hardware level. The daemon communicates with the guest agent via vsock (AF_VSOCK) -- no TCP networking is required between host and guest.
+**Firecracker**: Each microVM is fully isolated at the hardware level. The daemon communicates with the guest agent via vsock (AF_VSOCK) with no TCP networking between host and guest.
 
 ### Access control
 
