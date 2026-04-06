@@ -39,7 +39,10 @@ type jsonRPCError struct {
 
 // pending represents a pending RPC call awaiting a response.
 type pending struct {
-	ch chan jsonRPCResponse
+	ch          chan jsonRPCResponse
+	binaryBufs [][]byte     // collected binary frames before JSON response
+	expectBin  bool          // if true, collect binary frames into binaryBufs
+	binCh      chan [][]byte // channel to deliver collected binary buffers
 }
 
 // wsTransport implements RpcTransport over a WebSocket connection.
@@ -49,6 +52,10 @@ type wsTransport struct {
 	mu      sync.Mutex
 	pending map[int64]*pending
 	closed  chan struct{}
+
+	// binPendingID tracks which request ID should receive binary frames.
+	// Only one request can expect binary at a time (protocol is sequential per connection).
+	binPendingID atomic.Int64
 
 	notifMu   sync.RWMutex
 	notifHandler NotificationHandler
@@ -159,13 +166,25 @@ func (t *wsTransport) readLoop() {
 		}
 
 		if typ == websocket.MessageBinary {
-			// Binary messages are dispatched as notifications with special method.
-			// The caller tracks which pending request expects binary data.
-			t.notifMu.RLock()
-			h := t.notifHandler
-			t.notifMu.RUnlock()
-			if h != nil {
-				h("_binary", data)
+			// Route binary frames to the pending request that expects them.
+			binID := t.binPendingID.Load()
+			if binID > 0 {
+				t.mu.Lock()
+				if p, ok := t.pending[binID]; ok && p.expectBin {
+					// Make a copy of data since the websocket buffer may be reused.
+					buf := make([]byte, len(data))
+					copy(buf, data)
+					p.binaryBufs = append(p.binaryBufs, buf)
+				}
+				t.mu.Unlock()
+			} else {
+				// Fall back to notification handler for backward compatibility.
+				t.notifMu.RLock()
+				h := t.notifHandler
+				t.notifMu.RUnlock()
+				if h != nil {
+					h("_binary", data)
+				}
 			}
 			continue
 		}
@@ -208,6 +227,13 @@ func (t *wsTransport) readLoop() {
 			p, ok := t.pending[*resp.ID]
 			if ok {
 				delete(t.pending, *resp.ID)
+				// Clear binPendingID if this was the binary-expecting request.
+				if p.expectBin {
+					t.binPendingID.Store(0)
+					if p.binCh != nil {
+						p.binCh <- p.binaryBufs
+					}
+				}
 			}
 			t.mu.Unlock()
 			if ok {
@@ -271,6 +297,173 @@ func (t *wsTransport) Call(ctx context.Context, method string, params interface{
 		return result, nil
 	case <-t.closed:
 		return nil, &ConnectionError{SandboxError: SandboxError{
+			Message: "connection closed",
+		}}
+	}
+}
+
+// SendBinary sends raw binary data over the WebSocket connection.
+func (t *wsTransport) SendBinary(ctx context.Context, data []byte) error {
+	if err := t.conn.Write(ctx, websocket.MessageBinary, data); err != nil {
+		return &ConnectionError{SandboxError: SandboxError{
+			Message: fmt.Sprintf("write binary: %v", err),
+		}}
+	}
+	return nil
+}
+
+// CallWithBinary sends a JSON-RPC request, then sends binary data frame(s),
+// and waits for the JSON response. This is the correct protocol for fs.write/fs.upload.
+func (t *wsTransport) CallWithBinary(ctx context.Context, method string, params interface{}, data []byte) (interface{}, error) {
+	id := t.nextID.Add(1)
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      &id,
+		Method:  method,
+		Params:  params,
+	}
+
+	reqData, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	p := &pending{ch: make(chan jsonRPCResponse, 1)}
+
+	t.mu.Lock()
+	t.pending[id] = p
+	t.mu.Unlock()
+
+	// Send JSON request.
+	if err := t.conn.Write(ctx, websocket.MessageText, reqData); err != nil {
+		t.mu.Lock()
+		delete(t.pending, id)
+		t.mu.Unlock()
+		return nil, &ConnectionError{SandboxError: SandboxError{
+			Message: fmt.Sprintf("write: %v", err),
+		}}
+	}
+
+	// Send binary data in chunks if needed.
+	chunkSize := 1024 * 1024 // 1MB
+	for offset := 0; offset < len(data); offset += chunkSize {
+		end := offset + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		if err := t.conn.Write(ctx, websocket.MessageBinary, data[offset:end]); err != nil {
+			t.mu.Lock()
+			delete(t.pending, id)
+			t.mu.Unlock()
+			return nil, &ConnectionError{SandboxError: SandboxError{
+				Message: fmt.Sprintf("write binary: %v", err),
+			}}
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		t.mu.Lock()
+		delete(t.pending, id)
+		t.mu.Unlock()
+		return nil, &TimeoutError{SandboxError: SandboxError{
+			Message: ctx.Err().Error(),
+		}}
+	case resp := <-p.ch:
+		if resp.Error != nil {
+			return nil, &RpcError{
+				SandboxError: SandboxError{Message: resp.Error.Message},
+				Code:         resp.Error.Code,
+			}
+		}
+		var result interface{}
+		if resp.Result != nil {
+			if err := json.Unmarshal(resp.Result, &result); err != nil {
+				return nil, fmt.Errorf("unmarshal result: %w", err)
+			}
+		}
+		return result, nil
+	case <-t.closed:
+		return nil, &ConnectionError{SandboxError: SandboxError{
+			Message: "connection closed",
+		}}
+	}
+}
+
+// CallExpectBinary sends a JSON-RPC request and collects binary frames
+// that arrive before the JSON response. Used for fs.read/fs.download.
+func (t *wsTransport) CallExpectBinary(ctx context.Context, method string, params interface{}) (interface{}, [][]byte, error) {
+	id := t.nextID.Add(1)
+	req := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      &id,
+		Method:  method,
+		Params:  params,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	binCh := make(chan [][]byte, 1)
+	p := &pending{
+		ch:        make(chan jsonRPCResponse, 1),
+		expectBin: true,
+		binCh:     binCh,
+	}
+
+	t.mu.Lock()
+	t.pending[id] = p
+	t.mu.Unlock()
+
+	// Tell readLoop to route binary frames to this request.
+	t.binPendingID.Store(id)
+
+	if err := t.conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.mu.Lock()
+		delete(t.pending, id)
+		t.mu.Unlock()
+		t.binPendingID.Store(0)
+		return nil, nil, &ConnectionError{SandboxError: SandboxError{
+			Message: fmt.Sprintf("write: %v", err),
+		}}
+	}
+
+	select {
+	case <-ctx.Done():
+		t.mu.Lock()
+		delete(t.pending, id)
+		t.mu.Unlock()
+		t.binPendingID.Store(0)
+		return nil, nil, &TimeoutError{SandboxError: SandboxError{
+			Message: ctx.Err().Error(),
+		}}
+	case resp := <-p.ch:
+		// Collect the binary buffers that were accumulated.
+		var bufs [][]byte
+		select {
+		case bufs = <-binCh:
+		default:
+			bufs = p.binaryBufs
+		}
+
+		if resp.Error != nil {
+			return nil, bufs, &RpcError{
+				SandboxError: SandboxError{Message: resp.Error.Message},
+				Code:         resp.Error.Code,
+			}
+		}
+		var result interface{}
+		if resp.Result != nil {
+			if err := json.Unmarshal(resp.Result, &result); err != nil {
+				return nil, bufs, fmt.Errorf("unmarshal result: %w", err)
+			}
+		}
+		return result, bufs, nil
+	case <-t.closed:
+		t.binPendingID.Store(0)
+		return nil, nil, &ConnectionError{SandboxError: SandboxError{
 			Message: "connection closed",
 		}}
 	}

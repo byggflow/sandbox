@@ -78,6 +78,35 @@ func (t *encryptedTransport) Call(ctx context.Context, method string, params int
 	return t.decryptResult(result)
 }
 
+func (t *encryptedTransport) CallWithBinary(ctx context.Context, method string, params interface{}, data []byte) (interface{}, error) {
+	encrypted, err := t.encryptParams(params)
+	if err != nil {
+		return nil, fmt.Errorf("e2e encrypt params: %w", err)
+	}
+	result, err := t.inner.CallWithBinary(ctx, method, encrypted, data)
+	if err != nil {
+		return nil, err
+	}
+	return t.decryptResult(result)
+}
+
+func (t *encryptedTransport) CallExpectBinary(ctx context.Context, method string, params interface{}) (interface{}, [][]byte, error) {
+	encrypted, err := t.encryptParams(params)
+	if err != nil {
+		return nil, nil, fmt.Errorf("e2e encrypt params: %w", err)
+	}
+	result, bufs, err := t.inner.CallExpectBinary(ctx, method, encrypted)
+	if err != nil {
+		return nil, bufs, err
+	}
+	decrypted, err := t.decryptResult(result)
+	return decrypted, bufs, err
+}
+
+func (t *encryptedTransport) SendBinary(ctx context.Context, data []byte) error {
+	return t.inner.SendBinary(ctx, data)
+}
+
 func (t *encryptedTransport) Notify(ctx context.Context, method string, params interface{}) error {
 	encrypted, err := t.encryptParams(params)
 	if err != nil {
