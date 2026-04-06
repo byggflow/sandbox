@@ -6,14 +6,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/byggflow/sandbox/internal/config"
 	"github.com/byggflow/sandbox/internal/proxy"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
+	"github.com/byggflow/sandbox/internal/runtime"
 )
 
 // WarmContainer is a pre-started container ready for assignment.
@@ -27,43 +26,40 @@ type WarmContainer struct {
 	AuthToken   string
 	Agent       *proxy.AgentConn
 	Created     time.Time
+	RuntimeName string
 }
 
 // Manager maintains a warm pool of pre-started containers.
 type Manager struct {
-	docker      *client.Client
-	cfg         config.PoolConfig
-	networkID   string
-	networkName string
-	log         *slog.Logger
+	runtimes map[string]runtime.Runtime
+	cfg      config.PoolConfig
+	log      *slog.Logger
 
 	mu    sync.Mutex
 	warm  map[string][]*WarmContainer // image -> warm containers
-	freq  map[string][]time.Time       // image -> creation timestamps (sliding window)
+	freq  map[string][]time.Time      // image -> creation timestamps (sliding window)
 	close chan struct{}
 	wg    sync.WaitGroup
 }
 
 // Status describes the state of a pool profile.
 type Status struct {
-	Profile string `json:"profile"`
-	Image   string `json:"image"`
-	Ready   int    `json:"ready"`
-	Memory  string `json:"memory"`
+	Profile string  `json:"profile"`
+	Image   string  `json:"image"`
+	Ready   int     `json:"ready"`
+	Memory  string  `json:"memory"`
 	CPU     float64 `json:"cpu"`
 }
 
 // NewManager creates a new pool manager.
-func NewManager(docker *client.Client, cfg config.PoolConfig, networkID, networkName string, log *slog.Logger) *Manager {
+func NewManager(runtimes map[string]runtime.Runtime, cfg config.PoolConfig, log *slog.Logger) *Manager {
 	return &Manager{
-		docker:      docker,
-		cfg:         cfg,
-		networkID:   networkID,
-		networkName: networkName,
-		log:         log,
-		warm:        make(map[string][]*WarmContainer),
-		freq:        make(map[string][]time.Time),
-		close:       make(chan struct{}),
+		runtimes: runtimes,
+		cfg:      cfg,
+		log:      log,
+		warm:     make(map[string][]*WarmContainer),
+		freq:     make(map[string][]time.Time),
+		close:    make(chan struct{}),
 	}
 }
 
@@ -84,7 +80,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			m.log.Info("pre-warming pool", "profile", profile, "image", base.Image, "count", count)
 
 			for i := 0; i < count; i++ {
-				wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault())
+				wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault(), base.RuntimeOrDefault())
 				if err != nil {
 					m.log.Error("failed to create warm container", "profile", profile, "error", err)
 					continue
@@ -120,9 +116,9 @@ func (m *Manager) Stop(ctx context.Context) {
 			if wc.Agent != nil {
 				wc.Agent.Close()
 			}
-			timeout := 5
-			_ = m.docker.ContainerStop(ctx, wc.ContainerID, container.StopOptions{Timeout: &timeout})
-			_ = m.docker.ContainerRemove(ctx, wc.ContainerID, container.RemoveOptions{Force: true})
+			if rt, ok := m.runtimes[wc.RuntimeName]; ok {
+				_ = rt.Destroy(ctx, wc.ContainerID)
+			}
 		}
 		delete(m.warm, image)
 	}
@@ -152,11 +148,13 @@ func (m *Manager) Claim(image string) (*WarmContainer, bool) {
 			if err := wc.Agent.Ping(livenessTimeout); err != nil {
 				m.log.Warn("warm container failed liveness", "container", wc.ContainerID[:12], "error", err)
 				wc.Agent.Close()
-				go func(id string) {
+				go func(id, rtName string) {
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 					defer cancel()
-					_ = m.docker.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
-				}(wc.ContainerID)
+					if rt, ok := m.runtimes[rtName]; ok {
+						_ = rt.Destroy(ctx, id)
+					}
+				}(wc.ContainerID, wc.RuntimeName)
 				continue
 			}
 		}
@@ -206,7 +204,6 @@ func (m *Manager) Resize(ctx context.Context, profile string, count int) error {
 	}
 
 	// Scale up: create containers until we reach the desired count.
-	// Re-check count under lock after each creation to avoid overallocation.
 	for {
 		m.mu.Lock()
 		current := len(m.warm[base.Image])
@@ -216,7 +213,7 @@ func (m *Manager) Resize(ctx context.Context, profile string, count int) error {
 		}
 		m.mu.Unlock()
 
-		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault())
+		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault(), base.RuntimeOrDefault())
 		if err != nil {
 			return fmt.Errorf("create warm container: %w", err)
 		}
@@ -238,7 +235,9 @@ func (m *Manager) Resize(ctx context.Context, profile string, count int) error {
 			if wc.Agent != nil {
 				wc.Agent.Close()
 			}
-			_ = m.docker.ContainerRemove(ctx, wc.ContainerID, container.RemoveOptions{Force: true})
+			if rt, ok := m.runtimes[wc.RuntimeName]; ok {
+				_ = rt.Destroy(ctx, wc.ContainerID)
+			}
 		}
 	} else {
 		m.mu.Unlock()
@@ -269,13 +268,15 @@ func (m *Manager) Flush(ctx context.Context, profile string) error {
 		if wc.Agent != nil {
 			wc.Agent.Close()
 		}
-		_ = m.docker.ContainerRemove(ctx, wc.ContainerID, container.RemoveOptions{Force: true})
+		if rt, ok := m.runtimes[wc.RuntimeName]; ok {
+			_ = rt.Destroy(ctx, wc.ContainerID)
+		}
 	}
 
 	// Recreate.
 	count := m.cfg.MinBase
 	for i := 0; i < count; i++ {
-		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault())
+		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault(), base.RuntimeOrDefault())
 		if err != nil {
 			m.log.Error("failed to recreate warm container", "profile", profile, "error", err)
 			continue
@@ -288,9 +289,12 @@ func (m *Manager) Flush(ctx context.Context, profile string) error {
 	return nil
 }
 
-// createWarm creates and starts a single warm container.
-func (m *Manager) createWarm(ctx context.Context, image, profile string, memory int64, cpu float64, storage string) (*WarmContainer, error) {
-	nanoCPUs := int64(cpu * 1e9)
+// createWarm creates and starts a single warm container via the runtime.
+func (m *Manager) createWarm(ctx context.Context, image, profile string, memory int64, cpu float64, storage, runtimeName string) (*WarmContainer, error) {
+	rt, ok := m.runtimes[runtimeName]
+	if !ok {
+		return nil, fmt.Errorf("runtime %q not available", runtimeName)
+	}
 
 	// Generate auth token for this warm container.
 	tokenBytes := make([]byte, 32)
@@ -299,97 +303,61 @@ func (m *Manager) createWarm(ctx context.Context, image, profile string, memory 
 	}
 	authToken := hex.EncodeToString(tokenBytes)
 
-	resp, err := m.docker.ContainerCreate(ctx,
-		&container.Config{
-			Image: image,
-			Env:   []string{"SANDBOX_AUTH_TOKEN=" + authToken},
-			Labels: map[string]string{
-				"sandboxd":         "true",
-				"sandboxd.pool":    "warm",
-				"sandboxd.profile": profile,
-			},
+	inst, err := rt.Create(ctx, runtime.CreateOpts{
+		Image:     image,
+		Memory:    memory,
+		CPU:       cpu,
+		Storage:   storage,
+		AuthToken: authToken,
+		Labels: map[string]string{
+			"sandboxd.pool":    "warm",
+			"sandboxd.profile": profile,
 		},
-		&container.HostConfig{
-			CapDrop:        []string{"ALL"},
-			SecurityOpt:    []string{"no-new-privileges"},
-			ReadonlyRootfs: true,
-			Resources: container.Resources{
-				Memory:    memory,
-				NanoCPUs:  nanoCPUs,
-				PidsLimit: ptrInt64(256),
-			},
-			Tmpfs: map[string]string{
-				"/tmp":  "rw,noexec,nosuid,size=100m",
-				"/root": "rw,nosuid,size=" + storage,
-			},
-		},
-		&network.NetworkingConfig{
-			EndpointsConfig: map[string]*network.EndpointSettings{
-				m.networkName: {
-					NetworkID: m.networkID,
-				},
-			},
-		},
-		nil,
-		"",
-	)
+		Profile: profile,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("create container: %w", err)
+		return nil, fmt.Errorf("create instance: %w", err)
 	}
 
-	if err := m.docker.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return nil, fmt.Errorf("start container: %w", err)
-	}
-
-	// Get container IP.
-	inspect, err := m.docker.ContainerInspect(ctx, resp.ID)
-	if err != nil {
-		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return nil, fmt.Errorf("inspect container: %w", err)
-	}
-
-	ip := ""
-	if nw, ok := inspect.NetworkSettings.Networks[m.networkName]; ok {
-		ip = nw.IPAddress
-	}
-	if ip == "" {
-		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return nil, fmt.Errorf("container has no IP on network %s", m.networkName)
-	}
-
-	agentAddr := ip + ":9111"
-
-	// Wait for agent to be reachable with retries.
+	// Connect to agent. The runtime's Create already verified reachability,
+	// but we need to hold a persistent AgentConn for health checks.
+	agentAddr := inst.AgentAddr
 	var agent *proxy.AgentConn
-	for attempt := 0; attempt < 20; attempt++ {
-		agent, err = proxy.Dial(agentAddr, 2*time.Second)
-		if err == nil {
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		agent, lastErr = proxy.Dial(agentAddr, 2*time.Second)
+		if lastErr == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if err != nil {
-		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return nil, fmt.Errorf("connect to agent at %s: %w", agentAddr, err)
+	if lastErr != nil {
+		_ = rt.Destroy(ctx, inst.ID)
+		return nil, fmt.Errorf("connect to agent at %s: %w", agentAddr, lastErr)
 	}
 
-	// Authenticate with the agent (must be first message when auth token is set).
+	// Authenticate with the agent.
 	if err := agent.Authenticate(authToken, 2*time.Second); err != nil {
 		agent.Close()
-		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		_ = rt.Destroy(ctx, inst.ID)
 		return nil, fmt.Errorf("agent auth: %w", err)
 	}
 
 	// Verify liveness.
 	if err := agent.Ping(2 * time.Second); err != nil {
 		agent.Close()
-		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		_ = rt.Destroy(ctx, inst.ID)
 		return nil, fmt.Errorf("agent ping failed: %w", err)
 	}
 
+	// Extract IP from AgentAddr (strip ":port").
+	ip := agentAddr
+	if host, _, err := splitHostPort(agentAddr); err == nil {
+		ip = host
+	}
+
 	return &WarmContainer{
-		ContainerID: resp.ID,
+		ContainerID: inst.ID,
 		Image:       image,
 		Profile:     profile,
 		IP:          ip,
@@ -398,7 +366,13 @@ func (m *Manager) createWarm(ctx context.Context, image, profile string, memory 
 		AuthToken:   authToken,
 		Agent:       agent,
 		Created:     time.Now(),
+		RuntimeName: runtimeName,
 	}, nil
+}
+
+// splitHostPort extracts the host from a host:port address.
+func splitHostPort(addr string) (string, string, error) {
+	return net.SplitHostPort(addr)
 }
 
 // healthLoop periodically pings warm containers and removes dead ones.
@@ -492,11 +466,13 @@ func (m *Manager) healthCheck() {
 			if wc.Agent != nil {
 				wc.Agent.Close()
 			}
-			go func(id string) {
+			go func(id, rtName string) {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				_ = m.docker.ContainerRemove(ctx, id, container.RemoveOptions{Force: true})
-			}(wc.ContainerID)
+				if rt, ok := m.runtimes[rtName]; ok {
+					_ = rt.Destroy(ctx, id)
+				}
+			}(wc.ContainerID, wc.RuntimeName)
 		}
 	}
 	// Preserve images that were added after the snapshot was taken.
@@ -578,8 +554,6 @@ func (m *Manager) rebalance() {
 	}
 
 	// Distribute remaining slots proportionally by frequency.
-	// This is informational - we don't aggressively create/destroy,
-	// just ensure minimums are met. Excess drains naturally.
 	for _, base := range m.cfg.Base {
 		current := len(m.warm[base.Image])
 		desired := m.cfg.MinBase
@@ -600,8 +574,4 @@ func (m *Manager) rebalance() {
 			)
 		}
 	}
-}
-
-func ptrInt64(v int64) *int64 {
-	return &v
 }

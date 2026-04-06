@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-
 	"github.com/byggflow/sandbox/internal/identity"
 	"github.com/byggflow/sandbox/internal/proxy"
 	"github.com/byggflow/sandbox/protocol"
@@ -293,61 +291,25 @@ func (d *Daemon) handleSandboxStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// One-shot container stats from Docker.
-	statsResp, err := d.Docker.ContainerStatsOneShot(r.Context(), sbx.ContainerID)
+	// Get stats from the runtime.
+	rt := d.RuntimeFor(sbx)
+	rtStats, err := rt.Stats(r.Context(), sbx.ContainerID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("docker stats: %v", err))
-		return
-	}
-	defer statsResp.Body.Close()
-
-	var dockerStats container.StatsResponse
-	if err := json.NewDecoder(statsResp.Body).Decode(&dockerStats); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("decode stats: %v", err))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("runtime stats: %v", err))
 		return
 	}
 
-	// Calculate CPU percentage.
-	cpuPercent := 0.0
-	cpuDelta := float64(dockerStats.CPUStats.CPUUsage.TotalUsage) - float64(dockerStats.PreCPUStats.CPUUsage.TotalUsage)
-	systemDelta := float64(dockerStats.CPUStats.SystemUsage) - float64(dockerStats.PreCPUStats.SystemUsage)
-	if systemDelta > 0 && cpuDelta >= 0 {
-		onlineCPUs := float64(dockerStats.CPUStats.OnlineCPUs)
-		if onlineCPUs == 0 {
-			onlineCPUs = 1
-		}
-		cpuPercent = (cpuDelta / systemDelta) * onlineCPUs * 100.0
-		cpuPercent = math.Round(cpuPercent*100) / 100
-	}
-
-	// Memory.
-	memUsage := dockerStats.MemoryStats.Usage
-	memLimit := dockerStats.MemoryStats.Limit
-	memPercent := 0.0
-	if memLimit > 0 {
-		memPercent = float64(memUsage) / float64(memLimit) * 100.0
-		memPercent = math.Round(memPercent*100) / 100
-	}
-
-	// Network: sum all interfaces.
-	var netRx, netTx uint64
-	for _, ns := range dockerStats.Networks {
-		netRx += ns.RxBytes
-		netTx += ns.TxBytes
-	}
-
-	// Uptime from sandbox creation time.
 	uptimeSeconds := time.Since(sbx.Created).Seconds()
 	uptimeSeconds = math.Round(uptimeSeconds*100) / 100
 
 	stats := SandboxStats{
-		CPUPercent:       cpuPercent,
-		MemoryUsageBytes: memUsage,
-		MemoryLimitBytes: memLimit,
-		MemoryPercent:    memPercent,
-		NetworkRxBytes:   netRx,
-		NetworkTxBytes:   netTx,
-		PIDs:             dockerStats.PidsStats.Current,
+		CPUPercent:       rtStats.CPUPercent,
+		MemoryUsageBytes: rtStats.MemoryUsage,
+		MemoryLimitBytes: rtStats.MemoryLimit,
+		MemoryPercent:    rtStats.MemoryPercent,
+		NetworkRxBytes:   rtStats.NetRxBytes,
+		NetworkTxBytes:   rtStats.NetTxBytes,
+		PIDs:             rtStats.PIDs,
 		UptimeSeconds:    uptimeSeconds,
 	}
 
@@ -520,8 +482,9 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Capture the template via the pluggable backend (Docker commit, Firecracker snapshot, etc.).
+	tplBackend := d.TemplateBackendFor(sbx)
 	imageTag := "byggflow-sandbox:" + tplID
-	ref, imageSize, err := d.TemplateBackend.Capture(r.Context(), sbx.ContainerID, imageTag)
+	ref, imageSize, err := tplBackend.Capture(r.Context(), sbx.ContainerID, imageTag)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("template capture failed: %v", err))
 		return
@@ -531,7 +494,7 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 	if d.Config.Limits.MaxTemplateSize != "" {
 		maxSize, parseErr := parseByteSize(d.Config.Limits.MaxTemplateSize)
 		if parseErr == nil && imageSize > maxSize {
-			_ = d.TemplateBackend.Remove(r.Context(), ref)
+			_ = tplBackend.Remove(r.Context(), ref)
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("template size %d exceeds limit", imageSize))
 			return
 		}
@@ -546,7 +509,7 @@ func (d *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		ID:        tplID,
 		Label:     label,
 		Image:     ref,
-		Backend:   "docker",
+		Backend:   sbx.RuntimeName,
 		Identity:  id.Value,
 		Size:      imageSize,
 		CreatedAt: time.Now(),
@@ -614,8 +577,12 @@ func (d *Daemon) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove underlying image/snapshot via backend.
-	_ = d.TemplateBackend.Remove(r.Context(), tpl.Image)
+	// Remove underlying image/snapshot via the appropriate backend.
+	tplBackend := d.TemplateBackend
+	if tb, ok := d.TemplateBackends[tpl.Backend]; ok {
+		tplBackend = tb
+	}
+	_ = tplBackend.Remove(r.Context(), tpl.Image)
 
 	// Remove from registry.
 	d.Templates.Remove(tplID)

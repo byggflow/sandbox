@@ -40,6 +40,7 @@ type Sandbox struct {
 	Profile     string            `json:"profile,omitempty"`
 	Template    string            `json:"template,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
+	RuntimeName string            `json:"runtime,omitempty"` // "docker" or "firecracker"
 
 	// Session tracking.
 	Session *proxy.Session `json:"-"`
