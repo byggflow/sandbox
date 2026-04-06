@@ -12,6 +12,7 @@ import (
 	"time"
 
 	codec "github.com/byggflow/sandbox/agent/protocol"
+	proto "github.com/byggflow/sandbox/protocol"
 )
 
 // Conn is an alias for io.ReadWriter used by handlers that need binary frame I/O.
@@ -24,8 +25,10 @@ type PathParams struct {
 
 // WriteParams is the params for fs.write.
 type WriteParams struct {
-	Path string `json:"path"`
-	Size int    `json:"size"`
+	Path    string `json:"path"`
+	Size    int    `json:"size"`
+	Chunked bool   `json:"chunked,omitempty"`
+	Chunks  int    `json:"chunks,omitempty"`
 }
 
 // RemoveParams is the params for fs.remove.
@@ -65,7 +68,8 @@ func fileInfoFrom(fi os.FileInfo) FileInfo {
 	}
 }
 
-// Read reads a file and sends its content as a binary frame followed by a JSON result.
+// Read reads a file and sends its content as binary frame(s) followed by a JSON result.
+// Files larger than the chunk threshold are sent as multiple binary frames.
 func Read(raw json.RawMessage, conn Conn) (interface{}, error) {
 	var p PathParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -80,14 +84,38 @@ func Read(raw json.RawMessage, conn Conn) (interface{}, error) {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
 
-	if err := codec.WriteBinary(conn, data); err != nil {
-		return nil, fmt.Errorf("write binary frame: %w", err)
+	size := len(data)
+	chunkSize := proto.ChunkSize
+	chunked := size > proto.ChunkThreshold
+	chunks := 1
+
+	if chunked {
+		chunks = (size + chunkSize - 1) / chunkSize
+		for i := 0; i < chunks; i++ {
+			start := i * chunkSize
+			end := start + chunkSize
+			if end > size {
+				end = size
+			}
+			if err := codec.WriteBinary(conn, data[start:end]); err != nil {
+				return nil, fmt.Errorf("write binary chunk %d: %w", i, err)
+			}
+		}
+	} else {
+		if err := codec.WriteBinary(conn, data); err != nil {
+			return nil, fmt.Errorf("write binary frame: %w", err)
+		}
 	}
 
-	return map[string]interface{}{"size": len(data)}, nil
+	return map[string]interface{}{
+		"size":    size,
+		"chunked": chunked,
+		"chunks":  chunks,
+	}, nil
 }
 
-// Write reads a binary frame from conn and writes it to the file at path.
+// Write reads binary frame(s) from conn and writes them to the file at path.
+// If chunked is true, it reads the specified number of chunk frames.
 func Write(raw json.RawMessage, conn Conn) (interface{}, error) {
 	var p WriteParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -97,18 +125,33 @@ func Write(raw json.RawMessage, conn Conn) (interface{}, error) {
 		return nil, fmt.Errorf("path is required")
 	}
 
-	frame, err := codec.ReadFrame(conn)
-	if err != nil {
-		return nil, fmt.Errorf("read binary frame: %w", err)
-	}
-
 	dir := filepath.Dir(p.Path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create parent dirs: %w", err)
 	}
 
-	if err := os.WriteFile(p.Path, frame.Payload, 0644); err != nil {
-		return nil, fmt.Errorf("write file: %w", err)
+	if p.Chunked && p.Chunks > 1 {
+		// Read multiple binary frames and concatenate.
+		data := make([]byte, 0, p.Size)
+		for i := 0; i < p.Chunks; i++ {
+			frame, err := codec.ReadFrame(conn)
+			if err != nil {
+				return nil, fmt.Errorf("read binary chunk %d: %w", i, err)
+			}
+			data = append(data, frame.Payload...)
+		}
+		if err := os.WriteFile(p.Path, data, 0644); err != nil {
+			return nil, fmt.Errorf("write file: %w", err)
+		}
+	} else {
+		// Single binary frame (original behavior).
+		frame, err := codec.ReadFrame(conn)
+		if err != nil {
+			return nil, fmt.Errorf("read binary frame: %w", err)
+		}
+		if err := os.WriteFile(p.Path, frame.Payload, 0644); err != nil {
+			return nil, fmt.Errorf("write file: %w", err)
+		}
 	}
 
 	return map[string]interface{}{"success": true}, nil

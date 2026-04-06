@@ -139,9 +139,117 @@ func Exec(raw json.RawMessage) (interface{}, error) {
 	}, nil
 }
 
+// StreamParams is the params for process.stream.
+type StreamParams struct {
+	Command string            `json:"command"`
+	Env     map[string]string `json:"env,omitempty"`
+	Timeout int               `json:"timeout,omitempty"`
+	Cwd     string            `json:"cwd,omitempty"`
+}
+
 // Conn abstracts the framed connection for sending notifications.
 type Conn interface {
 	io.Writer
+}
+
+// Stream runs a command and streams stdout/stderr as notifications, then returns the exit code.
+func Stream(raw json.RawMessage, conn Conn) (interface{}, error) {
+	var p StreamParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.Command == "" {
+		return nil, fmt.Errorf("command is required")
+	}
+
+	const maxTimeout = 300 * time.Second
+	timeout := 30 * time.Second
+	if p.Timeout > 0 {
+		timeout = time.Duration(p.Timeout) * time.Second
+		if timeout > maxTimeout {
+			timeout = maxTimeout
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", p.Command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if p.Cwd != "" {
+		cmd.Dir = p.Cwd
+	}
+	if len(p.Env) > 0 {
+		cmd.Env = buildEnv(p.Env)
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		streamChunks(conn, "stdout", stdout)
+	}()
+	go func() {
+		defer wg.Done()
+		streamChunks(conn, "stderr", stderr)
+	}()
+
+	// Wait for output streams to drain before calling cmd.Wait.
+	wg.Wait()
+
+	exitCode := 0
+	if err := cmd.Wait(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("command timed out after %v", timeout)
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			return nil, fmt.Errorf("exec: %w", err)
+		}
+	}
+
+	return map[string]interface{}{"exit_code": exitCode}, nil
+}
+
+// streamChunks reads from r and sends each chunk as a process.output notification.
+func streamChunks(conn Conn, stream string, r io.Reader) {
+	buf := make([]byte, 8192)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			notif := proto.Notification{
+				JSONRPC: "2.0",
+				Method:  "process.output",
+				Params: map[string]interface{}{
+					"stream": stream,
+					"data":   string(buf[:n]),
+				},
+			}
+			if werr := codec.WriteJSON(conn, notif); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
 }
 
 // Spawn starts a process in the background and streams output as notifications.

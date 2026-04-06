@@ -16,3 +16,10 @@ const (
 // MaxFrameSize is the maximum allowed frame payload size (10MB).
 // Frames exceeding this limit cause an immediate connection close.
 const MaxFrameSize = 10 * 1024 * 1024
+
+// ChunkSize is the size of each chunk for chunked file transfers (1MB).
+// Files larger than this are split into multiple binary frames.
+const ChunkSize = 1 * 1024 * 1024
+
+// ChunkThreshold is the file size above which chunked transfer is used.
+const ChunkThreshold = 1 * 1024 * 1024

@@ -60,6 +60,9 @@ func NewDispatcher() *Dispatcher {
 
 	// Process
 	d.simple[proto.OpProcessExec] = process.Exec
+	d.conn[proto.OpProcessStream] = func(params json.RawMessage, c io.ReadWriter) (interface{}, error) {
+		return process.Stream(params, c)
+	}
 	d.conn[proto.OpProcessSpawn] = func(params json.RawMessage, c io.ReadWriter) (interface{}, error) {
 		return procMgr.Spawn(params, c)
 	}

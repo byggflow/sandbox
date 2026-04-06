@@ -15,9 +15,14 @@ const (
 
 	// Process
 	OpProcessExec   = "process.exec"
+	OpProcessStream = "process.stream"
 	OpProcessSpawn  = "process.spawn"
 	OpProcessPty    = "process.pty"
 	OpProcessResize = "process.resize"
+
+	// Streaming process output notifications
+	OpProcessOutput = "process.output"
+	OpProcessDone   = "process.done"
 
 	// Environment
 	OpEnvGet    = "env.get"
