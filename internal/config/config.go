@@ -17,6 +17,15 @@ type Config struct {
 	Limits      LimitsConfig      `toml:"limits"`
 	Network     NetworkConfig     `toml:"network"`
 	Pool        PoolConfig        `toml:"pool"`
+	Firecracker FirecrackerConfig `toml:"firecracker"`
+}
+
+// FirecrackerConfig holds Firecracker microVM runtime settings.
+type FirecrackerConfig struct {
+	BinaryPath   string `toml:"binary_path"`    // Path to firecracker binary.
+	KernelPath   string `toml:"kernel_path"`    // Path to uncompressed vmlinux kernel.
+	RootFSDir    string `toml:"rootfs_dir"`     // Directory containing rootfs images.
+	VsockCIDBase uint32 `toml:"vsock_cid_base"` // Starting CID for microVMs (e.g. 100).
 }
 
 // MultiTenantConfig enables cryptographic identity verification.
@@ -82,6 +91,15 @@ type BaseImageConfig struct {
 	Memory  string  `toml:"memory"`
 	CPU     float64 `toml:"cpu"`
 	Storage string  `toml:"storage"` // tmpfs size for /root (e.g. "500m", "1g"). Defaults to "500m".
+	Runtime string  `toml:"runtime"` // "docker" (default) or "firecracker".
+}
+
+// RuntimeOrDefault returns the runtime name, defaulting to "docker".
+func (b *BaseImageConfig) RuntimeOrDefault() string {
+	if b.Runtime == "" {
+		return "docker"
+	}
+	return b.Runtime
 }
 
 // MaxMemoryBytes parses MaxMemory as bytes.
@@ -224,11 +242,27 @@ func (c *Config) validate() error {
 	if c.Limits.TunnelPortMin > 0 && c.Limits.TunnelPortMax > 0 && c.Limits.TunnelPortMin > c.Limits.TunnelPortMax {
 		return fmt.Errorf("tunnel_port_min must be <= tunnel_port_max")
 	}
+	hasFirecracker := false
 	for name, base := range c.Pool.Base {
 		if base.Storage != "" {
 			if _, err := ParseByteSize(base.Storage); err != nil {
 				return fmt.Errorf("pool.base.%s.storage: %w", name, err)
 			}
+		}
+		rt := base.RuntimeOrDefault()
+		if rt != "docker" && rt != "firecracker" {
+			return fmt.Errorf("pool.base.%s.runtime: must be \"docker\" or \"firecracker\", got %q", name, rt)
+		}
+		if rt == "firecracker" {
+			hasFirecracker = true
+		}
+	}
+	if hasFirecracker {
+		if c.Firecracker.BinaryPath == "" {
+			return fmt.Errorf("firecracker.binary_path is required when a profile uses runtime = \"firecracker\"")
+		}
+		if c.Firecracker.KernelPath == "" {
+			return fmt.Errorf("firecracker.kernel_path is required when a profile uses runtime = \"firecracker\"")
 		}
 	}
 	return nil

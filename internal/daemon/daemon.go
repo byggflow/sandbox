@@ -11,20 +11,18 @@ import (
 	"github.com/byggflow/sandbox/internal/identity"
 	"github.com/byggflow/sandbox/internal/pool"
 	"github.com/byggflow/sandbox/internal/proxy"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/client"
+	"github.com/byggflow/sandbox/internal/runtime"
 )
 
 // Daemon is the main sandboxd service.
 type Daemon struct {
 	Config    config.Config
-	Docker    *client.Client
+	Runtimes  map[string]runtime.Runtime // keyed by runtime name ("docker", "firecracker")
 	Pool      *pool.Manager
 	Registry  *Registry
-	Templates *TemplateRegistry
-	TemplateBackend TemplateBackend // Pluggable capture/remove for templates.
+	Templates        *TemplateRegistry
+	TemplateBackend  TemplateBackend            // Default template backend (Docker).
+	TemplateBackends map[string]TemplateBackend // Per-runtime template backends.
 	Server    *Server
 	Metrics   *Metrics
 	Events    *EventBus
@@ -34,27 +32,47 @@ type Daemon struct {
 	CreateLimit *rateLimiter                    // Rate limiter for sandbox creation per identity.
 	Log       *slog.Logger
 
-	networkID string
 	ctx       context.Context
 	cancel    context.CancelFunc
 }
 
 // New creates a new Daemon instance.
 func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
-	docker, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	runtimes := make(map[string]runtime.Runtime)
+
+	// Always create the Docker runtime.
+	dockerRT, err := runtime.NewDockerRuntime(cfg.Network.BridgeName, log)
 	if err != nil {
-		return nil, fmt.Errorf("create docker client: %w", err)
+		return nil, fmt.Errorf("create docker runtime: %w", err)
+	}
+	runtimes["docker"] = dockerRT
+
+	// Create the Firecracker runtime if any profile uses it.
+	for _, base := range cfg.Pool.Base {
+		if base.RuntimeOrDefault() == "firecracker" {
+			fcRT := runtime.NewFirecrackerRuntime(cfg.Firecracker, log)
+			runtimes["firecracker"] = fcRT
+			break
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	templateBackends := map[string]TemplateBackend{
+		"docker": &DockerTemplateBackend{Docker: dockerRT.Client},
+	}
+	if fcRT, ok := runtimes["firecracker"].(*runtime.FirecrackerRuntime); ok {
+		templateBackends["firecracker"] = runtime.NewFirecrackerTemplateBackend(fcRT, cfg.Server.DataDir)
+	}
+
 	d := &Daemon{
-		Config:          cfg,
-		Docker:          docker,
-		Registry:        NewRegistry(),
-		Templates:       NewTemplateRegistry(),
-		TemplateBackend: &DockerTemplateBackend{Docker: docker},
-		Metrics:         NewMetrics(),
+		Config:           cfg,
+		Runtimes:         runtimes,
+		Registry:         NewRegistry(),
+		Templates:        NewTemplateRegistry(),
+		TemplateBackend:  &DockerTemplateBackend{Docker: dockerRT.Client},
+		TemplateBackends: templateBackends,
+		Metrics:          NewMetrics(),
 		Events:          NewEventBus(0),
 		Tunnels:         NewTunnelManager(cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
 		AuthLimit:       newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
@@ -82,18 +100,18 @@ func (d *Daemon) Verifier() *identity.Verifier {
 	return d.verifier.Load()
 }
 
-// Start initializes the daemon: ensures the Docker network exists,
-// starts the warm pool, and begins listening for requests.
+// Start initializes the daemon: initializes runtimes, starts the warm pool,
+// and begins listening for requests.
 func (d *Daemon) Start(ctx context.Context) error {
-	// Ensure the Docker network exists.
-	networkID, err := d.ensureNetwork(ctx)
-	if err != nil {
-		return fmt.Errorf("ensure network: %w", err)
+	// Initialize all runtimes (e.g. ensure Docker network, validate Firecracker paths).
+	for name, rt := range d.Runtimes {
+		if err := rt.Init(ctx); err != nil {
+			return fmt.Errorf("init runtime %s: %w", name, err)
+		}
 	}
-	d.networkID = networkID
 
 	// Create and start the pool manager.
-	d.Pool = pool.NewManager(d.Docker, d.Config.Pool, d.networkID, d.Config.Network.BridgeName, d.Log)
+	d.Pool = pool.NewManager(d.Runtimes, d.Config.Pool, d.Log)
 	if err := d.Pool.Start(ctx); err != nil {
 		d.Log.Error("pool start failed (continuing without warm pool)", "error", err)
 	}
@@ -142,9 +160,11 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 		d.Pool.Stop(ctx)
 	}
 
-	// Close Docker client.
-	if d.Docker != nil {
-		d.Docker.Close()
+	// Close all runtimes.
+	for name, rt := range d.Runtimes {
+		if err := rt.Close(); err != nil {
+			d.Log.Error("failed to close runtime", "runtime", name, "error", err)
+		}
 	}
 
 	d.Log.Info("sandboxd stopped")
@@ -306,6 +326,19 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		return nil, err
 	}
 
+	// Resolve runtime for this profile.
+	runtimeName := "docker"
+	if profile != "" {
+		if base, ok := d.Config.Pool.Base[profile]; ok {
+			runtimeName = base.RuntimeOrDefault()
+		}
+	}
+
+	rt, ok := d.Runtimes[runtimeName]
+	if !ok {
+		return nil, fmt.Errorf("runtime %q not available", runtimeName)
+	}
+
 	// Record creation frequency.
 	d.Pool.RecordCreation(image)
 
@@ -329,6 +362,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 				Profile:     profile,
 				Template:    templateID,
 				Labels:      req.Labels,
+				RuntimeName: runtimeName,
 				Buffer:      NewNotificationBuffer(),
 			}
 			if err := d.Registry.Add(sbx); err != nil {
@@ -346,21 +380,29 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		}
 	}
 
-	// Cold start: create a new container.
-	d.Log.Info("cold starting sandbox", "id", sbxID, "image", image)
-	containerID, agentAddr, err := d.createContainer(ctx, image, memory, cpu, storage, authToken)
+	// Cold start: create a new instance via the runtime.
+	d.Log.Info("cold starting sandbox", "id", sbxID, "image", image, "runtime", runtimeName)
+	inst, err := rt.Create(ctx, runtime.CreateOpts{
+		Image:     image,
+		Memory:    memory,
+		CPU:       cpu,
+		Storage:   storage,
+		AuthToken: authToken,
+		Labels:    req.Labels,
+		Profile:   profile,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("create container: %w", err)
+		return nil, fmt.Errorf("create instance: %w", err)
 	}
 
 	sbx := &Sandbox{
 		ID:          sbxID,
-		ContainerID: containerID,
+		ContainerID: inst.ID,
 		Image:       image,
 		State:       StateRunning,
 		Identity:    id,
 		IdentityStr: id.Value,
-		AgentAddr:   agentAddr,
+		AgentAddr:   inst.AgentAddr,
 		AuthToken:   authToken,
 		Created:     time.Now(),
 		TTL:         ttl,
@@ -369,6 +411,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		Profile:     profile,
 		Template:    templateID,
 		Labels:      req.Labels,
+		RuntimeName: runtimeName,
 		Buffer:      NewNotificationBuffer(),
 	}
 	if err := d.Registry.Add(sbx); err != nil {
@@ -382,7 +425,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		"labels":  req.Labels,
 		"method":  "cold",
 	})
-	d.Log.Info("sandbox created (cold)", "id", sbxID, "container", containerID[:12])
+	d.Log.Info("sandbox created (cold)", "id", sbxID, "container", inst.ID[:12])
 	return sbx, nil
 }
 
@@ -415,10 +458,12 @@ func (d *Daemon) destroySandbox(ctx context.Context, sbx *Sandbox) error {
 	}
 	sbx.mu.Unlock()
 
-	timeout := 5
-	_ = d.Docker.ContainerStop(ctx, sbx.ContainerID, container.StopOptions{Timeout: &timeout})
-	if err := d.Docker.ContainerRemove(ctx, sbx.ContainerID, container.RemoveOptions{Force: true}); err != nil {
-		return fmt.Errorf("remove container %s: %w", sbx.ContainerID[:12], err)
+	rt, ok := d.Runtimes[sbx.RuntimeName]
+	if !ok {
+		rt = d.Runtimes["docker"] // fallback for sandboxes created before runtime field existed
+	}
+	if err := rt.Destroy(ctx, sbx.ContainerID); err != nil {
+		return fmt.Errorf("destroy instance %s: %w", sbx.ContainerID[:12], err)
 	}
 
 	sbx.mu.Lock()
@@ -494,135 +539,20 @@ func (d *Daemon) ConnectAgent(sbx *Sandbox) (*proxy.AgentConn, error) {
 	return agent, nil
 }
 
-// createContainer creates and starts a new Docker container, waits for the
-// agent to be reachable, and returns the container ID and agent address.
-func (d *Daemon) createContainer(ctx context.Context, image string, memory int64, cpu float64, storage string, authToken string) (string, string, error) {
-	nanoCPUs := int64(cpu * 1e9)
-
-	var envVars []string
-	if authToken != "" {
-		envVars = append(envVars, "SANDBOX_AUTH_TOKEN="+authToken)
+// RuntimeFor returns the runtime associated with the sandbox, falling back to Docker.
+func (d *Daemon) RuntimeFor(sbx *Sandbox) runtime.Runtime {
+	if rt, ok := d.Runtimes[sbx.RuntimeName]; ok {
+		return rt
 	}
-
-	resp, err := d.Docker.ContainerCreate(ctx,
-		&container.Config{
-			Image: image,
-			Env:   envVars,
-			Labels: map[string]string{
-				"sandboxd": "true",
-			},
-		},
-		&container.HostConfig{
-			CapDrop:        []string{"ALL"},
-			SecurityOpt:    []string{"no-new-privileges"},
-			ReadonlyRootfs: true,
-			Resources: container.Resources{
-				Memory:    memory,
-				NanoCPUs:  nanoCPUs,
-				PidsLimit: ptrInt64(256),
-			},
-			Tmpfs: map[string]string{
-				"/tmp":  "rw,noexec,nosuid,size=100m",
-				"/root": "rw,nosuid,size=" + storage,
-			},
-		},
-		&network.NetworkingConfig{
-			EndpointsConfig: map[string]*network.EndpointSettings{
-				d.Config.Network.BridgeName: {
-					NetworkID: d.networkID,
-				},
-			},
-		},
-		nil,
-		"",
-	)
-	if err != nil {
-		return "", "", fmt.Errorf("docker create: %w", err)
-	}
-
-	if err := d.Docker.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = d.Docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return "", "", fmt.Errorf("docker start: %w", err)
-	}
-
-	// Get container IP.
-	inspect, err := d.Docker.ContainerInspect(ctx, resp.ID)
-	if err != nil {
-		_ = d.Docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return "", "", fmt.Errorf("docker inspect: %w", err)
-	}
-
-	ip := ""
-	if nw, ok := inspect.NetworkSettings.Networks[d.Config.Network.BridgeName]; ok {
-		ip = nw.IPAddress
-	}
-	if ip == "" {
-		_ = d.Docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return "", "", fmt.Errorf("no IP on network %s", d.Config.Network.BridgeName)
-	}
-
-	agentAddr := ip + ":9111"
-
-	// Wait for agent to be reachable.
-	var lastErr error
-	for attempt := 0; attempt < 30; attempt++ {
-		agent, err := proxy.Dial(agentAddr, 2*time.Second)
-		if err == nil {
-			// Authenticate first when token is set (agent requires auth as first message).
-			if authToken != "" {
-				if authErr := agent.Authenticate(authToken, 2*time.Second); authErr != nil {
-					agent.Close()
-					lastErr = authErr
-					time.Sleep(100 * time.Millisecond)
-					continue
-				}
-			}
-			if pingErr := agent.Ping(2 * time.Second); pingErr == nil {
-				agent.Close()
-				return resp.ID, agentAddr, nil
-			}
-			agent.Close()
-		}
-		lastErr = err
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	_ = d.Docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-	return "", "", fmt.Errorf("agent not reachable at %s: %w", agentAddr, lastErr)
+	return d.Runtimes["docker"]
 }
 
-// ensureNetwork creates the sandboxd Docker bridge network if it doesn't exist.
-func (d *Daemon) ensureNetwork(ctx context.Context) (string, error) {
-	name := d.Config.Network.BridgeName
-
-	// Check if it already exists.
-	nets, err := d.Docker.NetworkList(ctx, network.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("name", name)),
-	})
-	if err != nil {
-		return "", fmt.Errorf("list networks: %w", err)
+// TemplateBackendFor returns the template backend for the sandbox's runtime.
+func (d *Daemon) TemplateBackendFor(sbx *Sandbox) TemplateBackend {
+	if tb, ok := d.TemplateBackends[sbx.RuntimeName]; ok {
+		return tb
 	}
-
-	for _, n := range nets {
-		if n.Name == name {
-			d.Log.Info("using existing network", "name", name, "id", n.ID[:12])
-			return n.ID, nil
-		}
-	}
-
-	// Create it. ICC is disabled to prevent container-to-container communication.
-	netResp, err := d.Docker.NetworkCreate(ctx, name, network.CreateOptions{
-		Driver: "bridge",
-		Options: map[string]string{
-			"com.docker.network.bridge.enable_icc": "false",
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("create network %s: %w", name, err)
-	}
-
-	d.Log.Info("created network", "name", name, "id", netResp.ID[:12])
-	return netResp.ID, nil
+	return d.TemplateBackend
 }
 
 // runTemplateExpiry periodically checks for expired templates and removes them.
@@ -666,18 +596,18 @@ func (d *Daemon) expireTemplates(ctx context.Context) {
 				continue
 			}
 
-			// Remove the underlying image/snapshot via backend.
+			// Remove the underlying image/snapshot via the appropriate backend.
 			if tpl.Image != "" {
-				if err := d.TemplateBackend.Remove(ctx, tpl.Image); err != nil {
+				tplBackend := d.TemplateBackend
+				if tb, ok := d.TemplateBackends[tpl.Backend]; ok {
+					tplBackend = tb
+				}
+				if err := tplBackend.Remove(ctx, tpl.Image); err != nil {
 					d.Log.Error("failed to remove expired template image", "id", tpl.ID, "image", tpl.Image, "error", err)
 				}
 			}
 		}
 	}
-}
-
-func ptrInt64(v int64) *int64 {
-	return &v
 }
 
 // parseByteSize wraps config.parseByteSize for use in the daemon package.

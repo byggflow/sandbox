@@ -38,16 +38,23 @@ func NewServer(addr string) *Server {
 	}
 }
 
-// ListenAndServe starts the TCP listener and accepts connections.
+// ListenAndServe starts a TCP listener on the configured address and serves connections.
 func (s *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	s.listener = ln
 	log.Printf("agent listening on %s", s.addr)
+	return s.Serve(ln)
+}
 
-	// Handle graceful shutdown
+// Serve accepts connections on the given listener. This enables the agent to
+// serve over any transport (TCP, vsock, Unix socket) by passing the
+// appropriate listener.
+func (s *Server) Serve(ln net.Listener) error {
+	s.listener = ln
+
+	// Handle graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
