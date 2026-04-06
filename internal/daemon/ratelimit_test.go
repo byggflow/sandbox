@@ -1,12 +1,13 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
 
 func TestRateLimiterBasic(t *testing.T) {
-	rl := newRateLimiter(3, 1*time.Minute)
+	rl := newRateLimiter(3, 1*time.Minute, 10000)
 
 	if rl.isBlocked("1.2.3.4") {
 		t.Fatal("should not be blocked before any failures")
@@ -25,7 +26,7 @@ func TestRateLimiterBasic(t *testing.T) {
 }
 
 func TestRateLimiterWindowExpiry(t *testing.T) {
-	rl := newRateLimiter(2, 50*time.Millisecond)
+	rl := newRateLimiter(2, 50*time.Millisecond, 10000)
 
 	rl.record("10.0.0.1")
 	rl.record("10.0.0.1")
@@ -41,7 +42,7 @@ func TestRateLimiterWindowExpiry(t *testing.T) {
 }
 
 func TestRateLimiterIsolation(t *testing.T) {
-	rl := newRateLimiter(2, 1*time.Minute)
+	rl := newRateLimiter(2, 1*time.Minute, 10000)
 
 	rl.record("10.0.0.1")
 	rl.record("10.0.0.1")
@@ -54,26 +55,25 @@ func TestRateLimiterIsolation(t *testing.T) {
 }
 
 func TestRateLimiterEviction(t *testing.T) {
-	// Use a small cap for testing.
-	origMax := maxRateLimitEntries
-	defer func() {
-		// Can't reassign const, so we test with the real limit behavior.
-		_ = origMax
-	}()
+	// Use a small maxEntries to exercise the eviction path.
+	rl := newRateLimiter(5, 1*time.Minute, 5)
 
-	// We can't change the const, so instead test that recording many IPs
-	// doesn't panic or cause issues. The eviction path is exercised when
-	// entries >= maxRateLimitEntries.
-	rl := newRateLimiter(5, 1*time.Minute)
-
-	// Record from many unique IPs — should not panic.
-	for i := 0; i < 100; i++ {
-		ip := "10.0.0." + string(rune('0'+i%10))
+	// Record from more unique IPs than maxEntries.
+	for i := 0; i < 10; i++ {
+		ip := fmt.Sprintf("10.0.0.%d", i)
 		rl.record(ip)
 	}
 
+	// Map should never exceed maxEntries.
+	rl.mu.Lock()
+	count := len(rl.entries)
+	rl.mu.Unlock()
+	if count > 5 {
+		t.Errorf("expected at most 5 entries, got %d", count)
+	}
+
 	// Verify the limiter still works correctly.
-	rl2 := newRateLimiter(1, 1*time.Minute)
+	rl2 := newRateLimiter(1, 1*time.Minute, 10000)
 	rl2.record("test-ip")
 	if !rl2.isBlocked("test-ip") {
 		t.Fatal("should be blocked after 1 failure with limit 1")

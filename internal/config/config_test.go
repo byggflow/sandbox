@@ -151,22 +151,22 @@ func TestParseByteSize(t *testing.T) {
 		{"2t", 2 * 1024 * 1024 * 1024 * 1024},
 	}
 	for _, tt := range tests {
-		got, err := parseByteSize(tt.input)
+		got, err := ParseByteSize(tt.input)
 		if err != nil {
-			t.Errorf("parseByteSize(%q): %v", tt.input, err)
+			t.Errorf("ParseByteSize(%q): %v", tt.input, err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("parseByteSize(%q) = %d, want %d", tt.input, got, tt.want)
+			t.Errorf("ParseByteSize(%q) = %d, want %d", tt.input, got, tt.want)
 		}
 	}
 }
 
 func TestParseByteSizeErrors(t *testing.T) {
 	for _, input := range []string{"", "abc", "x"} {
-		_, err := parseByteSize(input)
+		_, err := ParseByteSize(input)
 		if err == nil {
-			t.Errorf("expected error for parseByteSize(%q)", input)
+			t.Errorf("expected error for ParseByteSize(%q)", input)
 		}
 	}
 }

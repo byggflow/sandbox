@@ -55,6 +55,9 @@ func (eb *EventBus) Subscribe(bufferSize int) (string, <-chan Event) {
 	defer eb.mu.Unlock()
 
 	if len(eb.subscribers) >= maxSubscribers {
+		eb.cleanStaleLocked()
+	}
+	if len(eb.subscribers) >= maxSubscribers {
 		return "", nil
 	}
 
@@ -62,6 +65,17 @@ func (eb *EventBus) Subscribe(bufferSize int) (string, <-chan Event) {
 	ch := make(chan Event, bufferSize)
 	eb.subscribers[id] = ch
 	return id, ch
+}
+
+// cleanStaleLocked removes subscribers whose channels are at capacity (full buffer).
+// Must be called with eb.mu held.
+func (eb *EventBus) cleanStaleLocked() {
+	for id, ch := range eb.subscribers {
+		if len(ch) == cap(ch) {
+			close(ch)
+			delete(eb.subscribers, id)
+		}
+	}
 }
 
 // Unsubscribe removes a subscriber and closes its channel.

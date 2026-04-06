@@ -52,6 +52,7 @@ type LimitsConfig struct {
 	MaxTemplates            int     `toml:"max_templates"`
 	MaxTemplateSize         string  `toml:"max_template_size"`
 	TemplateExpiryDays      int     `toml:"template_expiry_days"`
+	RateLimitEntries        int     `toml:"rate_limit_entries"`         // Max tracked rate limit entries. Default 10000.
 	MaxTunnels              int     `toml:"max_tunnels"`               // Per-sandbox tunnel limit. Default 10.
 	MaxConnectionsPerTunnel int     `toml:"max_connections_per_tunnel"` // Concurrent TCP connections per tunnel. Default 100.
 	TunnelPortMin           int     `toml:"tunnel_port_min"`            // Host port range start. 0 = OS assigns.
@@ -85,7 +86,7 @@ type BaseImageConfig struct {
 
 // MaxMemoryBytes parses MaxMemory as bytes.
 func (l *LimitsConfig) MaxMemoryBytes() (int64, error) {
-	return parseByteSize(l.MaxMemory)
+	return ParseByteSize(l.MaxMemory)
 }
 
 // RebalanceWindowDuration parses RebalanceWindow as a duration.
@@ -105,7 +106,7 @@ func (p *PoolConfig) LivenessTimeoutDuration() (time.Duration, error) {
 
 // MemoryBytes parses Memory as bytes for a base image config.
 func (b *BaseImageConfig) MemoryBytes() (int64, error) {
-	return parseByteSize(b.Memory)
+	return ParseByteSize(b.Memory)
 }
 
 // StorageOrDefault returns the storage size string, defaulting to "500m" if empty.
@@ -132,6 +133,7 @@ func Defaults() Config {
 			MaxTemplates:            50,
 			MaxTemplateSize:         "2g",
 			TemplateExpiryDays:      60,
+			RateLimitEntries:        10_000,
 			MaxTunnels:              10,
 			MaxConnectionsPerTunnel: 100,
 		},
@@ -224,7 +226,7 @@ func (c *Config) validate() error {
 	}
 	for name, base := range c.Pool.Base {
 		if base.Storage != "" {
-			if _, err := parseByteSize(base.Storage); err != nil {
+			if _, err := ParseByteSize(base.Storage); err != nil {
 				return fmt.Errorf("pool.base.%s.storage: %w", name, err)
 			}
 		}
@@ -232,8 +234,8 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// parseByteSize parses a human-readable byte size like "512m", "4g", "1024k".
-func parseByteSize(s string) (int64, error) {
+// ParseByteSize parses a human-readable byte size like "512m", "4g", "1024k".
+func ParseByteSize(s string) (int64, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	if s == "" {
 		return 0, fmt.Errorf("empty size string")

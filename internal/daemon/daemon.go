@@ -57,8 +57,8 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		Metrics:         NewMetrics(),
 		Events:          NewEventBus(0),
 		Tunnels:         NewTunnelManager(cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
-		AuthLimit:       newRateLimiter(10, 1*time.Minute),
-		CreateLimit:     newRateLimiter(20, 1*time.Minute),
+		AuthLimit:       newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
+		CreateLimit:     newRateLimiter(20, 1*time.Minute, cfg.Limits.RateLimitEntries),
 		Log:             log,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -268,6 +268,23 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 			return nil, fmt.Errorf("invalid storage size: %w", err)
 		}
 		storage = req.Storage
+	}
+
+	// Check global memory limit.
+	if d.Config.Limits.MaxMemory != "" {
+		maxMem, err := config.ParseByteSize(d.Config.Limits.MaxMemory)
+		if err == nil && maxMem > 0 && memory > 0 {
+			if d.Registry.AllocMemory()+memory > maxMem {
+				return nil, ErrAtCapacity
+			}
+		}
+	}
+
+	// Check global CPU limit.
+	if d.Config.Limits.MaxCPU > 0 && cpu > 0 {
+		if d.Registry.AllocCPU()+cpu > d.Config.Limits.MaxCPU {
+			return nil, ErrAtCapacity
+		}
 	}
 
 	// Validate TTL: clamp to per-request limit, then to global limit.

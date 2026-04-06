@@ -157,14 +157,18 @@ func (s *Sandbox) CancelReaper() {
 
 // Registry manages active sandboxes.
 type Registry struct {
-	mu        sync.RWMutex
-	sandboxes map[string]*Sandbox
+	mu          sync.RWMutex
+	sandboxes   map[string]*Sandbox
+	byIdentity  map[string]int // identity -> sandbox count
+	allocMemory int64          // total allocated memory in bytes
+	allocCPU    float64        // total allocated CPU cores
 }
 
 // NewRegistry creates a new sandbox registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		sandboxes: make(map[string]*Sandbox),
+		sandboxes:  make(map[string]*Sandbox),
+		byIdentity: make(map[string]int),
 	}
 }
 
@@ -177,6 +181,9 @@ func (r *Registry) Add(sbx *Sandbox) error {
 		return fmt.Errorf("sandbox %s already exists", sbx.ID)
 	}
 	r.sandboxes[sbx.ID] = sbx
+	r.byIdentity[sbx.IdentityStr]++
+	r.allocMemory += sbx.Memory
+	r.allocCPU += sbx.CPU
 	return nil
 }
 
@@ -194,10 +201,17 @@ func (r *Registry) Get(id string) (*Sandbox, bool) {
 func (r *Registry) Remove(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.sandboxes[id]; !ok {
+	sbx, ok := r.sandboxes[id]
+	if !ok {
 		return false
 	}
 	delete(r.sandboxes, id)
+	r.allocMemory -= sbx.Memory
+	r.allocCPU -= sbx.CPU
+	r.byIdentity[sbx.IdentityStr]--
+	if r.byIdentity[sbx.IdentityStr] <= 0 {
+		delete(r.byIdentity, sbx.IdentityStr)
+	}
 	return true
 }
 
@@ -220,14 +234,21 @@ func (r *Registry) List(id identity.Identity) []*Sandbox {
 func (r *Registry) CountByIdentity(identity string) int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.byIdentity[identity]
+}
 
-	count := 0
-	for _, sbx := range r.sandboxes {
-		if sbx.IdentityStr == identity {
-			count++
-		}
-	}
-	return count
+// AllocMemory returns the total allocated memory across all sandboxes in bytes.
+func (r *Registry) AllocMemory() int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.allocMemory
+}
+
+// AllocCPU returns the total allocated CPU cores across all sandboxes.
+func (r *Registry) AllocCPU() float64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.allocCPU
 }
 
 // Count returns the total number of registered sandboxes.

@@ -547,7 +547,11 @@ func (m *Manager) rebalance() {
 				recent = append(recent, t)
 			}
 		}
-		m.freq[image] = recent
+		if len(recent) == 0 {
+			delete(m.freq, image)
+		} else {
+			m.freq[image] = recent
+		}
 		imageFreq[image] = len(recent)
 		totalCreations += len(recent)
 	}
