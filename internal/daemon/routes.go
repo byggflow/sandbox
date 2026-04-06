@@ -3,10 +3,15 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +40,13 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 	mux.HandleFunc("DELETE /templates/{id}", tenant(d.handleDeleteTemplate))
 
 	mux.HandleFunc("GET /profiles", tenant(d.handleListProfiles))
+
+	// Port tunneling routes.
+	mux.HandleFunc("POST /sandboxes/{id}/ports/{port}/expose", tenant(d.handleExposePort))
+	mux.HandleFunc("DELETE /sandboxes/{id}/ports/{port}/expose", tenant(d.handleClosePort))
+	mux.HandleFunc("GET /sandboxes/{id}/ports", tenant(d.handleListPorts))
+	mux.HandleFunc("/sandboxes/{id}/ports/{port}/", tenant(d.handlePortProxy))
+	mux.HandleFunc("/sandboxes/{id}/ports/{port}", tenant(d.handlePortProxy))
 
 	// Admin routes — pool management. Not tenant-scoped; restricted to Unix socket.
 	mux.HandleFunc("GET /pools", d.socketOnly(d.handlePoolStatus))
@@ -841,4 +853,262 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"error": fmt.Sprintf("%s", message),
 	})
+}
+
+// Port tunneling handlers.
+
+// lookupSandboxForPort is a helper that extracts the sandbox by {id} path param,
+// checks tenant identity, and returns the sandbox or writes an error.
+func (d *Daemon) lookupSandboxForPort(w http.ResponseWriter, r *http.Request) (*Sandbox, bool) {
+	sbxID := r.PathValue("id")
+	if sbxID == "" {
+		writeError(w, http.StatusBadRequest, "sandbox id required")
+		return nil, false
+	}
+
+	id := identity.Extract(r)
+
+	sbx, ok := d.Registry.Get(sbxID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return nil, false
+	}
+
+	if !id.Empty() && !sbx.Identity.Matches(id) {
+		writeError(w, http.StatusNotFound, "sandbox not found")
+		return nil, false
+	}
+
+	return sbx, true
+}
+
+// parsePort parses the {port} path parameter and validates it.
+func parsePort(w http.ResponseWriter, r *http.Request) (int, bool) {
+	portStr := r.PathValue("port")
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		writeError(w, http.StatusBadRequest, "invalid port number")
+		return 0, false
+	}
+	return port, true
+}
+
+func (d *Daemon) handleExposePort(w http.ResponseWriter, r *http.Request) {
+	sbx, ok := d.lookupSandboxForPort(w, r)
+	if !ok {
+		return
+	}
+
+	port, ok := parsePort(w, r)
+	if !ok {
+		return
+	}
+
+	if sbx.GetState() != StateRunning {
+		writeError(w, http.StatusConflict, "sandbox is not running")
+		return
+	}
+
+	sbx.mu.Lock()
+	if sbx.Tunnels == nil {
+		sbx.Tunnels = make(map[int]*Tunnel)
+	}
+	if _, exists := sbx.Tunnels[port]; exists {
+		sbx.mu.Unlock()
+		writeError(w, http.StatusConflict, "port already exposed")
+		return
+	}
+	if len(sbx.Tunnels) >= d.Config.Limits.MaxTunnels {
+		sbx.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("tunnel limit reached (%d)", d.Config.Limits.MaxTunnels))
+		return
+	}
+	sbx.mu.Unlock()
+
+	// Parse optional timeout from request body.
+	timeout := 30 * time.Second
+	if r.Body != nil {
+		var body struct {
+			Timeout int `json:"timeout"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil && body.Timeout > 0 {
+			timeout = time.Duration(body.Timeout) * time.Second
+			if timeout > 120*time.Second {
+				timeout = 120 * time.Second
+			}
+		}
+	}
+
+	tunnel, err := d.Tunnels.Expose(r.Context(), sbx, port, timeout)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	sbx.mu.Lock()
+	sbx.Tunnels[port] = tunnel
+	sbx.mu.Unlock()
+
+	d.Log.Info("port exposed", "sandbox", sbx.ID, "port", port, "host_port", tunnel.HostPort)
+
+	writeJSON(w, http.StatusOK, TunnelInfo{
+		Port:     port,
+		HostPort: tunnel.HostPort,
+		URL:      fmt.Sprintf("http://localhost:%d", tunnel.HostPort),
+	})
+}
+
+func (d *Daemon) handleClosePort(w http.ResponseWriter, r *http.Request) {
+	sbx, ok := d.lookupSandboxForPort(w, r)
+	if !ok {
+		return
+	}
+
+	port, ok := parsePort(w, r)
+	if !ok {
+		return
+	}
+
+	sbx.mu.Lock()
+	tunnel, exists := sbx.Tunnels[port]
+	if exists {
+		delete(sbx.Tunnels, port)
+	}
+	sbx.mu.Unlock()
+
+	if !exists {
+		writeError(w, http.StatusNotFound, "port not exposed")
+		return
+	}
+
+	d.Tunnels.Close(tunnel)
+	d.Log.Info("port closed", "sandbox", sbx.ID, "port", port)
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (d *Daemon) handleListPorts(w http.ResponseWriter, r *http.Request) {
+	sbx, ok := d.lookupSandboxForPort(w, r)
+	if !ok {
+		return
+	}
+
+	sbx.mu.Lock()
+	ports := make([]TunnelInfo, 0, len(sbx.Tunnels))
+	for port, t := range sbx.Tunnels {
+		ports = append(ports, TunnelInfo{
+			Port:     port,
+			HostPort: t.HostPort,
+			URL:      fmt.Sprintf("http://localhost:%d", t.HostPort),
+		})
+	}
+	sbx.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, ports)
+}
+
+func (d *Daemon) handlePortProxy(w http.ResponseWriter, r *http.Request) {
+	sbx, ok := d.lookupSandboxForPort(w, r)
+	if !ok {
+		return
+	}
+
+	port, ok := parsePort(w, r)
+	if !ok {
+		return
+	}
+
+	containerIP := sbx.ContainerIP()
+	if containerIP == "" {
+		writeError(w, http.StatusBadGateway, "sandbox has no container IP")
+		return
+	}
+
+	target, err := url.Parse(fmt.Sprintf("http://%s:%d", containerIP, port))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "invalid target URL")
+		return
+	}
+
+	// Check for WebSocket upgrade.
+	if strings.EqualFold(r.Header.Get("Connection"), "upgrade") &&
+		strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		d.proxyWebSocket(w, r, containerIP, port)
+		return
+	}
+
+	// Strip the /sandboxes/{id}/ports/{port} prefix from the request path.
+	prefix := fmt.Sprintf("/sandboxes/%s/ports/%d", sbx.ID, port)
+	originalPath := r.URL.Path
+	r.URL.Path = strings.TrimPrefix(originalPath, prefix)
+	if r.URL.Path == "" {
+		r.URL.Path = "/"
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("proxy error: %v", err))
+	}
+
+	// Set forwarding headers.
+	r.Header.Set("X-Forwarded-For", remoteIP(r))
+	r.Header.Set("X-Forwarded-Proto", "http")
+	if r.TLS != nil {
+		r.Header.Set("X-Forwarded-Proto", "https")
+	}
+	r.Header.Set("X-Forwarded-Host", r.Host)
+	r.Header.Set("X-Sandbox-ID", sbx.ID)
+
+	proxy.ServeHTTP(w, r)
+}
+
+// proxyWebSocket hijacks the connection and relays bytes to container_ip:port.
+func (d *Daemon) proxyWebSocket(w http.ResponseWriter, r *http.Request, containerIP string, port int) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "WebSocket hijack not supported")
+		return
+	}
+
+	target := fmt.Sprintf("%s:%d", containerIP, port)
+	upstream, err := net.DialTimeout("tcp", target, 5*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("upstream dial failed: %v", err))
+		return
+	}
+
+	client, buf, err := hijacker.Hijack()
+	if err != nil {
+		upstream.Close()
+		return
+	}
+
+	// Forward the original HTTP upgrade request to the upstream.
+	if err := r.Write(upstream); err != nil {
+		client.Close()
+		upstream.Close()
+		return
+	}
+
+	// Flush any buffered data from the hijacked connection.
+	if buf.Reader.Buffered() > 0 {
+		buffered := make([]byte, buf.Reader.Buffered())
+		buf.Read(buffered)
+		upstream.Write(buffered)
+	}
+
+	// Bidirectional relay.
+	done := make(chan struct{})
+	go func() {
+		io.Copy(upstream, client)
+		close(done)
+	}()
+	go func() {
+		io.Copy(client, upstream)
+		close(done)
+	}()
+
+	<-done
+	client.Close()
+	upstream.Close()
 }
