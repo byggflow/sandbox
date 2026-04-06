@@ -2,10 +2,7 @@
   "mcpServers": {
     "sandbox": {
       "command": "bun",
-      "args": ["../src/index.ts"],
-      "env": {
-        "SANDBOXD_IMAGE": "sandboxd:local"
-      }
+      "args": ["../src/index.ts"]
     }
   }
 }

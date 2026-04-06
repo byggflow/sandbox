@@ -4,11 +4,13 @@ import {
   createTrackedSandbox,
   createTemplate,
   destroySandbox,
+  ensureDaemon,
   getSandbox,
   listProfiles,
   listSandboxes,
   listTemplates,
   McpError,
+  resolveHeaders,
 } from "./connection.ts";
 
 
@@ -388,6 +390,105 @@ export function registerTools(server: McpServer): void {
         return {
           content: [{ type: "text", text: JSON.stringify({ entries }, null, 2) }],
         };
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  // ── Port Tunneling ─────────────────────────────────────────────
+
+  server.tool(
+    "sandbox_port_url",
+    "Get a proxy URL to access a port inside a sandbox. Returns a path-based URL that routes through the daemon. Works immediately, no allocation needed. Best for API calls and health checks. Note: web apps using absolute paths should use sandbox_expose_port instead.",
+    {
+      sandbox_id: z.string().describe("Sandbox ID"),
+      port: z.number().describe("Port number (1-65535)"),
+    },
+    async ({ sandbox_id, port }) => {
+      try {
+        const conn = await ensureDaemon();
+        const url = `${conn.httpBase}/sandboxes/${sandbox_id}/ports/${port}`;
+        return { content: [{ type: "text", text: JSON.stringify({ url }) }] };
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.tool(
+    "sandbox_expose_port",
+    "Expose a sandbox port with a dedicated URL. Allocates a host port and waits for the port to accept connections. Returns a clean origin URL suitable for web apps, CORS, and browser access.",
+    {
+      sandbox_id: z.string().describe("Sandbox ID"),
+      port: z.number().describe("Port number (1-65535)"),
+      timeout: z.number().optional().describe("Seconds to wait for port readiness (default: 30)"),
+    },
+    async ({ sandbox_id, port, timeout }) => {
+      try {
+        const conn = await ensureDaemon();
+        const body: Record<string, unknown> = {};
+        if (timeout) body.timeout = timeout;
+        const resp = await fetch(`${conn.httpBase}/sandboxes/${sandbox_id}/ports/${port}/expose`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(await resolveHeaders(conn.auth)) },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new McpError("expose_failed", `Failed to expose port: ${text}`, "Check that the sandbox is running and the port is valid.");
+        }
+        const data = await resp.json();
+        return { content: [{ type: "text", text: JSON.stringify(data) }] };
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.tool(
+    "sandbox_close_port",
+    "Close an exposed sandbox port and release the host port allocation.",
+    {
+      sandbox_id: z.string().describe("Sandbox ID"),
+      port: z.number().describe("Port number to close"),
+    },
+    async ({ sandbox_id, port }) => {
+      try {
+        const conn = await ensureDaemon();
+        const resp = await fetch(`${conn.httpBase}/sandboxes/${sandbox_id}/ports/${port}/expose`, {
+          method: "DELETE",
+          headers: await resolveHeaders(conn.auth),
+        });
+        if (!resp.ok && resp.status !== 404) {
+          const text = await resp.text();
+          throw new McpError("close_failed", `Failed to close port: ${text}`, "Check that the port was previously exposed.");
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ success: true }) }] };
+      } catch (e) {
+        return errorResult(e);
+      }
+    },
+  );
+
+  server.tool(
+    "sandbox_list_ports",
+    "List all exposed ports for a sandbox with their URLs.",
+    {
+      sandbox_id: z.string().describe("Sandbox ID"),
+    },
+    async ({ sandbox_id }) => {
+      try {
+        const conn = await ensureDaemon();
+        const resp = await fetch(`${conn.httpBase}/sandboxes/${sandbox_id}/ports`, {
+          headers: await resolveHeaders(conn.auth),
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new McpError("list_ports_failed", `Failed to list ports: ${text}`, "Check that the sandbox exists.");
+        }
+        const data = await resp.json();
+        return { content: [{ type: "text", text: JSON.stringify({ ports: data }, null, 2) }] };
       } catch (e) {
         return errorResult(e);
       }

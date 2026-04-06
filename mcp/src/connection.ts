@@ -25,7 +25,7 @@ function resolveHttpBase(endpoint: string): string {
   return endpoint.replace(/\/$/, "");
 }
 
-async function resolveHeaders(auth: string | undefined): Promise<Record<string, string>> {
+export async function resolveHeaders(auth: string | undefined): Promise<Record<string, string>> {
   if (!auth) return {};
   return { Authorization: `Bearer ${auth}` };
 }
