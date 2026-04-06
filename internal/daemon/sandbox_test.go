@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,11 +60,18 @@ func TestRegistryBasicOperations(t *testing.T) {
 		t.Errorf("count: got %d, want 1", reg.Count())
 	}
 
-	// Remove.
-	reg.Remove("sbx-test1")
+	// Remove returns true on first call.
+	if !reg.Remove("sbx-test1") {
+		t.Error("expected Remove to return true")
+	}
 	_, ok = reg.Get("sbx-test1")
 	if ok {
 		t.Error("expected not found after remove")
+	}
+
+	// Remove returns false on second call.
+	if reg.Remove("sbx-test1") {
+		t.Error("expected Remove to return false for already-removed sandbox")
 	}
 }
 
@@ -175,8 +184,62 @@ func TestRegistryCountByIdentity(t *testing.T) {
 	}
 
 	// Remove one of alice's sandboxes and verify count updates.
-	reg.Remove("sbx-a1")
+	if !reg.Remove("sbx-a1") {
+		t.Error("expected Remove to return true")
+	}
 	if got := reg.CountByIdentity("alice"); got != 2 {
 		t.Errorf("after remove: CountByIdentity(alice) = %d, want 2", got)
+	}
+}
+
+func TestRegistryRemoveConcurrent(t *testing.T) {
+	const numSandboxes = 100
+	const goroutinesPerSandbox = 2
+
+	reg := NewRegistry()
+
+	// Register all sandboxes.
+	for i := 0; i < numSandboxes; i++ {
+		id := fmt.Sprintf("sbx-%04d", i)
+		if err := reg.Add(&Sandbox{ID: id, Image: "test:latest"}); err != nil {
+			t.Fatalf("add %s: %v", id, err)
+		}
+	}
+
+	// For each sandbox, track how many goroutines get true from Remove.
+	wins := make([]atomic.Int32, numSandboxes)
+
+	var wg sync.WaitGroup
+	wg.Add(numSandboxes * goroutinesPerSandbox)
+
+	// Use a start barrier so all goroutines race at the same time.
+	start := make(chan struct{})
+
+	for i := 0; i < numSandboxes; i++ {
+		id := fmt.Sprintf("sbx-%04d", i)
+		for g := 0; g < goroutinesPerSandbox; g++ {
+			idx := i
+			go func() {
+				defer wg.Done()
+				<-start
+				if reg.Remove(id) {
+					wins[idx].Add(1)
+				}
+			}()
+		}
+	}
+
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < numSandboxes; i++ {
+		got := wins[i].Load()
+		if got != 1 {
+			t.Errorf("sandbox sbx-%04d: expected exactly 1 winner, got %d", i, got)
+		}
+	}
+
+	if reg.Count() != 0 {
+		t.Errorf("expected empty registry, got %d", reg.Count())
 	}
 }

@@ -372,12 +372,18 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 // DestroySandbox removes a sandbox and its container.
 func (d *Daemon) DestroySandbox(ctx context.Context, sbx *Sandbox) error {
 	sbx.CancelReaper()
-	d.Metrics.IncDestroy()
-	d.publishSandboxEvent("sandbox.destroyed", sbx, nil)
 	return d.destroySandbox(ctx, sbx)
 }
 
 func (d *Daemon) destroySandbox(ctx context.Context, sbx *Sandbox) error {
+	// Atomically claim ownership of this destroy. Only one goroutine wins.
+	if !d.Registry.Remove(sbx.ID) {
+		return nil
+	}
+
+	d.Metrics.IncDestroy()
+	d.publishSandboxEvent("sandbox.destroyed", sbx, nil)
+
 	sbx.mu.Lock()
 	sbx.State = StateStopping
 	// Close persistent agent if any.
@@ -391,8 +397,6 @@ func (d *Daemon) destroySandbox(ctx context.Context, sbx *Sandbox) error {
 		delete(sbx.Tunnels, port)
 	}
 	sbx.mu.Unlock()
-
-	d.Registry.Remove(sbx.ID)
 
 	timeout := 5
 	_ = d.Docker.ContainerStop(ctx, sbx.ContainerID, container.StopOptions{Timeout: &timeout})

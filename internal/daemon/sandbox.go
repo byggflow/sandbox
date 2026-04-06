@@ -188,11 +188,17 @@ func (r *Registry) Get(id string) (*Sandbox, bool) {
 	return sbx, ok
 }
 
-// Remove removes a sandbox from the registry.
-func (r *Registry) Remove(id string) {
+// Remove atomically removes a sandbox from the registry.
+// Returns true if the sandbox was found and removed, false if already gone.
+// Only one concurrent caller can get true for a given ID.
+func (r *Registry) Remove(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.sandboxes[id]; !ok {
+		return false
+	}
 	delete(r.sandboxes, id)
+	return true
 }
 
 // List returns all sandboxes matching the given identity.
