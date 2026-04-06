@@ -8,7 +8,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     golang-go \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=base /usr/local/bin/sandbox-agent /usr/local/bin/sandbox-agent
-RUN useradd -m -d /home/sandbox sandbox
-USER sandbox
-WORKDIR /home/sandbox
+WORKDIR /root
 ENTRYPOINT ["/usr/local/bin/sandbox-agent"]

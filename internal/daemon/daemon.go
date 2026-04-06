@@ -480,7 +480,7 @@ func (d *Daemon) createContainer(ctx context.Context, image string, memory int64
 			},
 			Tmpfs: map[string]string{
 				"/tmp":          "rw,noexec,nosuid,size=100m",
-				"/home/sandbox": "rw,noexec,nosuid,size=500m",
+				"/root": "rw,nosuid,size=500m",
 			},
 		},
 		&network.NetworkingConfig{

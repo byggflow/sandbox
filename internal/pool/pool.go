@@ -315,7 +315,7 @@ func (m *Manager) createWarm(ctx context.Context, image, profile string, memory 
 			},
 			Tmpfs: map[string]string{
 				"/tmp":          "rw,noexec,nosuid,size=100m",
-				"/home/sandbox": "rw,noexec,nosuid,size=500m",
+				"/root": "rw,nosuid,size=500m",
 			},
 		},
 		&network.NetworkingConfig{
