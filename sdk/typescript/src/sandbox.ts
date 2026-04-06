@@ -131,9 +131,12 @@ function buildSandbox(id: string, transport: RpcTransport): Sandbox {
 
       async write(path: string, content: string | Uint8Array): Promise<void> {
         const data = typeof content === "string" ? new TextEncoder().encode(content) : content;
-        await call(ctx, { method: "fs.write", params: { path, size: data.byteLength } });
+        // Send the RPC and binary data without awaiting in between — the agent
+        // reads the binary frame as part of handling fs.write, so it must arrive
+        // before the agent can respond.
+        const result = call(ctx, { method: "fs.write", params: { path, size: data.byteLength } });
         transport.sendBinary(data);
-        await call(ctx, { method: "fs.writeComplete" });
+        await result;
       },
 
       async list(path: string): Promise<string[]> {
@@ -155,9 +158,9 @@ function buildSandbox(id: string, transport: RpcTransport): Sandbox {
       },
 
       async upload(path: string, tar: Uint8Array): Promise<void> {
-        await call(ctx, { method: "fs.upload", params: { path, size: tar.byteLength } });
+        const result = call(ctx, { method: "fs.upload", params: { path, size: tar.byteLength } });
         transport.sendBinary(tar);
-        await call(ctx, { method: "fs.uploadComplete" });
+        await result;
       },
 
       async download(path: string): Promise<Uint8Array> {
@@ -190,7 +193,7 @@ function buildSandbox(id: string, transport: RpcTransport): Sandbox {
         return {
           stdout: (result.stdout as string) ?? "",
           stderr: (result.stderr as string) ?? "",
-          exitCode: (result.exitCode as number) ?? -1,
+          exitCode: (result.exit_code as number) ?? -1,
         };
       },
 
