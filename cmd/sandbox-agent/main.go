@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 
 	"github.com/byggflow/sandbox/agent"
@@ -17,11 +18,37 @@ func main() {
 		port = "9111"
 	}
 
-	addr := fmt.Sprintf(":%s", port)
-	srv := agent.NewServer(addr)
+	transport := os.Getenv("SANDBOX_TRANSPORT")
+	if transport == "" {
+		// Auto-detect: use vsock if /dev/vsock exists.
+		if _, err := os.Stat("/dev/vsock"); err == nil {
+			transport = "vsock"
+		} else {
+			transport = "tcp"
+		}
+	}
 
-	log.Printf("sandbox-agent starting on %s", addr)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("fatal: %v", err)
+	srv := agent.NewServer(fmt.Sprintf(":%s", port))
+
+	switch transport {
+	case "vsock":
+		ln, err := listenVsock(port)
+		if err != nil {
+			log.Fatalf("vsock listen: %v", err)
+		}
+		log.Printf("sandbox-agent starting on vsock port %s", port)
+		if err := srv.Serve(ln); err != nil {
+			log.Fatalf("fatal: %v", err)
+		}
+	default:
+		addr := fmt.Sprintf(":%s", port)
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatalf("tcp listen: %v", err)
+		}
+		log.Printf("sandbox-agent starting on tcp %s", addr)
+		if err := srv.Serve(ln); err != nil {
+			log.Fatalf("fatal: %v", err)
+		}
 	}
 }
