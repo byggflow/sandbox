@@ -1,8 +1,8 @@
 # Sandbox
 
-High-frequency container sandboxing as a service.
+High-frequency sandboxing as a service.
 
-sandboxd is a daemon that runs alongside Docker, exposes a Unix socket, and makes spinning up isolated environments as cheap and fast as possible. It manages a warm pool of pre-created containers so that creating a sandbox takes single-digit milliseconds instead of seconds.
+sandboxd is a daemon that exposes a Unix socket and makes spinning up isolated environments as cheap and fast as possible. It supports two runtime backends (Docker containers and Firecracker microVMs) with per-profile runtime selection. A warm pool of pre-created sandboxes means allocation takes single-digit milliseconds instead of seconds.
 
 Built and maintained by [Byggflow](https://byggflow.com).
 
@@ -19,6 +19,7 @@ Built and maintained by [Byggflow](https://byggflow.com).
 
 - Linux host with Docker installed
 - Go 1.25+ (for building from source)
+- (Optional) Firecracker + KVM for microVM sandboxes
 
 ### Install from source
 
@@ -251,29 +252,39 @@ CLI / SDK / MCP
     |  HTTP + WebSocket over Unix socket (or TCP/TLS)
     v
 sandboxd (daemon)
-    |-- Warm Pool (pre-started containers, <5ms allocation)
+    |-- Runtime Interface (Docker containers or Firecracker microVMs)
+    |-- Warm Pool (pre-started sandboxes, <5ms allocation)
     |-- Port Tunnel Manager (path-based proxy + host port allocation)
     |-- Identity Scoping (multi-tenant resource isolation)
     |-- Event Stream (SSE for sandbox lifecycle events)
     |
-    |  Binary-framed protocol over TCP
+    |  Binary-framed protocol over TCP (Docker) or vsock (Firecracker)
     v
-Guest Agent (inside container)
+Guest Agent (inside container or microVM)
     |
     |  Direct syscalls
     v
 Filesystem / Processes / Network
 ```
 
-The daemon manages container lifecycle, warm pools, WebSocket sessions, and port tunneling. The guest agent runs inside each container and handles filesystem operations, process execution, and network requests. Clients never talk directly to containers.
+The daemon manages sandbox lifecycle, warm pools, WebSocket sessions, and port tunneling. The guest agent runs inside each sandbox and handles filesystem operations, process execution, and network requests. Clients never talk directly to sandboxes.
+
+### Runtimes
+
+| Runtime | Isolation | Transport | Use case |
+|---|---|---|---|
+| **Docker** (default) | Container (cgroups + namespaces) | TCP over bridge network | General purpose, fast startup |
+| **Firecracker** | microVM (KVM hardware virtualization) | vsock (AF_VSOCK) | Untrusted code, stronger isolation |
+
+Runtimes are selected per profile in the config. The SDK and API are identical regardless of backend, so callers don't need to know which runtime is in use.
 
 All resources (sandboxes, templates, tunnels) are scoped to the caller's identity in multi-tenant mode.
 
 ## Warm pool
 
-The core differentiator. Instead of creating a container on every request, the daemon maintains a pool of pre-started containers with the agent already connected. Creating a sandbox from the warm pool takes <5ms.
+The core differentiator. Instead of creating a sandbox on every request, the daemon maintains a pool of pre-started sandboxes (containers or microVMs) with the agent already connected. Creating a sandbox from the warm pool takes <5ms.
 
-The pool dynamically allocates slots based on creation frequency across images, with configurable minimums for base images and autoscaling based on hit/miss ratio. Health checks run on a configurable interval, and unhealthy containers are replaced automatically.
+The pool dynamically allocates slots based on creation frequency across profiles, with configurable minimums for base images and autoscaling based on hit/miss ratio. Health checks run on a configurable interval, and unhealthy sandboxes are replaced automatically.
 
 ## Sandbox capabilities
 
@@ -378,7 +389,8 @@ Key config sections:
 | `limits` | `max_sandboxes`, `max_memory`, `max_cpu`, `max_ttl`, `max_templates`, `max_template_size`, `template_expiry_days`, `rate_limit_entries`, `max_tunnels`, `max_connections_per_tunnel`, `tunnel_port_min`, `tunnel_port_max` |
 | `network` | `bridge_name` |
 | `pool` | `total_warm`, `min_per_image`, `min_base`, `max_warm`, `rebalance_window`, `health_interval`, `liveness_timeout` |
-| `pool.base.<name>` | `image`, `memory`, `cpu`, `storage` |
+| `pool.base.<name>` | `image`, `memory`, `cpu`, `storage`, `runtime` (`docker` or `firecracker`) |
+| `firecracker` | `binary_path`, `kernel_path`, `rootfs_dir`, `vsock_cid_base` |
 
 ## Docker images
 
@@ -398,7 +410,7 @@ All sandbox images include the guest agent binary. Use `pool.base.<name>.image` 
 
 sandboxd is designed to run untrusted code. Every sandbox is locked down by default -- no opt-in required.
 
-### Container hardening
+### Container hardening (Docker runtime)
 
 | Control | Detail |
 |---|---|
@@ -409,9 +421,21 @@ sandboxd is designed to run untrusted code. Every sandbox is locked down by defa
 | Tmpfs size caps | `/tmp` 100MB, `/root` configurable (default 500MB) |
 | Memory and CPU caps | Per-sandbox cgroup limits, hard-capped by daemon config |
 
+### microVM isolation (Firecracker runtime)
+
+| Control | Detail |
+|---|---|
+| Hardware virtualization | Each sandbox is a dedicated KVM virtual machine |
+| Minimal attack surface | Firecracker has ~50k lines of Rust, no BIOS/USB/PCI |
+| vsock communication | Host-guest communication via AF_VSOCK, no network bridge |
+| CoW rootfs | Each VM gets a copy-on-write disk image |
+| Memory and vCPU caps | Configured per-profile in the daemon config |
+
 ### Network isolation
 
-Each sandbox runs on a dedicated Docker bridge network (`sandboxd-net`) with inter-container communication disabled. Sandboxes can reach the internet but cannot reach each other. The daemon communicates with agents via container IPs on the bridge -- no ports are exposed on the host.
+**Docker**: Each sandbox runs on a dedicated Docker bridge network (`sandboxd-net`) with inter-container communication disabled. Sandboxes can reach the internet but cannot reach each other. The daemon communicates with agents via container IPs on the bridge -- no ports are exposed on the host.
+
+**Firecracker**: Each microVM is fully isolated at the hardware level. The daemon communicates with the guest agent via vsock (AF_VSOCK) with no TCP networking between host and guest.
 
 ### Access control
 
