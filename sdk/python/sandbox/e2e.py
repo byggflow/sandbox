@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
@@ -48,6 +48,9 @@ class EncryptedTransport(RpcTransport):
         self._inner = inner
         self._gcm = AESGCM(shared_secret)
 
+    async def send(self, op: str, params: Dict[str, Any]) -> Any:
+        return await self.call(op, params)
+
     async def call(self, method: str, params: Any = None) -> Any:
         encrypted = self._encrypt_params(params)
         result = await self._inner.call(method, encrypted)
@@ -68,6 +71,23 @@ class EncryptedTransport(RpcTransport):
                 handler(method, params)
 
         self._inner.on_notification(wrapper)
+
+    async def call_with_binary(
+        self, method: str, params: Dict[str, Any], data: bytes
+    ) -> Any:
+        encrypted = self._encrypt_params(params)
+        result = await self._inner.call_with_binary(method, encrypted, data)
+        return self._decrypt_result(result)
+
+    async def call_expect_binary(
+        self, method: str, params: Dict[str, Any]
+    ) -> Tuple[Any, List[bytes]]:
+        encrypted = self._encrypt_params(params)
+        result, bufs = await self._inner.call_expect_binary(method, encrypted)
+        return self._decrypt_result(result), bufs
+
+    async def send_binary(self, data: bytes) -> None:
+        await self._inner.send_binary(data)
 
     async def close(self) -> None:
         await self._inner.close()

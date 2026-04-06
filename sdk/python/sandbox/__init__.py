@@ -24,7 +24,7 @@ from .errors import (
 )
 from .fs import FsCategory
 from .net import NetCategory
-from .process import ExecResult, ProcessCategory, PtyHandle, SpawnHandle
+from .process import ExecResult, OutputEvent, ProcessCategory, PtyHandle, SpawnHandle, StreamExecHandle
 from .sandbox import (
     DEFAULT_ENDPOINT,
     ConnectOptions,
@@ -56,6 +56,8 @@ __all__ = [
     "ExecResult",
     "SpawnHandle",
     "PtyHandle",
+    "OutputEvent",
+    "StreamExecHandle",
     # Call infrastructure
     "CallContext",
     "call",

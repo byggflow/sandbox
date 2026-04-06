@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -15,6 +16,41 @@ class ExecResult:
     stdout: str
     stderr: str
     exit_code: int
+
+
+@dataclass
+class OutputEvent:
+    """A single output event from a streaming process."""
+
+    stream: str  # "stdout" or "stderr"
+    data: str
+
+
+class StreamExecHandle:
+    """Handle for a streaming process execution.
+
+    Iterate asynchronously to receive output events, then await
+    ``exit_code()`` to get the final status.
+    """
+
+    def __init__(
+        self,
+        output: asyncio.Queue[Optional[OutputEvent]],
+        exit_code_future: asyncio.Future[int],
+    ) -> None:
+        self._output = output
+        self._exit_code_future = exit_code_future
+
+    async def __aiter__(self):
+        while True:
+            event = await self._output.get()
+            if event is None:
+                break
+            yield event
+
+    async def exit_code(self) -> int:
+        """Wait for the process to exit and return the exit code."""
+        return await self._exit_code_future
 
 
 class SpawnHandle:
@@ -126,6 +162,58 @@ class ProcessCategory:
         result = await call(self._ctx, "process.spawn", params)
         pid: int = result.get("pid", 0)
         return SpawnHandle(self._ctx, pid)
+
+    async def stream_exec(
+        self,
+        command: str,
+        *,
+        env: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+        cwd: Optional[str] = None,
+    ) -> StreamExecHandle:
+        """Run *command* with streaming output.
+
+        Returns a ``StreamExecHandle`` that yields ``OutputEvent`` items
+        and exposes an ``exit_code()`` awaitable.
+        """
+        output: asyncio.Queue[Optional[OutputEvent]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        exit_code_future: asyncio.Future[int] = loop.create_future()
+
+        def _on_notification(method: str, params: Any) -> None:
+            if method != "process.output":
+                return
+            if params is None:
+                return
+            stream = params.get("stream", "stdout")
+            data = params.get("data", "")
+            if data:
+                output.put_nowait(OutputEvent(stream=stream, data=data))
+
+        self._ctx.transport.on_notification(_on_notification)
+
+        rpc_params: Dict[str, Any] = {"command": command}
+        if env is not None:
+            rpc_params["env"] = env
+        if timeout is not None:
+            rpc_params["timeout"] = timeout
+        if cwd is not None:
+            rpc_params["cwd"] = cwd
+
+        async def _run() -> None:
+            try:
+                result = await call(self._ctx, "process.stream", rpc_params)
+                output.put_nowait(None)
+                if not exit_code_future.done():
+                    code = result.get("exit_code", -1)
+                    exit_code_future.set_result(int(code))
+            except Exception as exc:
+                output.put_nowait(None)
+                if not exit_code_future.done():
+                    exit_code_future.set_exception(exc)
+
+        asyncio.create_task(_run())
+        return StreamExecHandle(output, exit_code_future)
 
     async def pty(
         self,

@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Union
 
 from .call import CallContext, call
+from .errors import SandboxError
+from .transport import CHUNK_SIZE
 
 
 class FsCategory:
@@ -15,21 +17,27 @@ class FsCategory:
 
     async def read(self, path: str) -> bytes:
         """Read a file and return its contents as bytes."""
-        result = await call(self._ctx, "fs.read", {"path": path})
-        if isinstance(result, bytes):
-            return result
-        if isinstance(result, str):
-            return result.encode()
-        return bytes(result)
+        result, bufs = await self._ctx.transport.call_expect_binary(
+            "fs.read", {"path": path, "sandbox_id": self._ctx.sandbox_id}
+        )
+        if not bufs:
+            raise SandboxError("no binary data received for fs.read")
+        return b"".join(bufs)
 
     async def write(self, path: str, content: Union[str, bytes]) -> None:
         """Write *content* to *path*, creating or overwriting the file."""
-        payload: Dict[str, Any] = {"path": path}
-        if isinstance(content, str):
-            payload["content"] = content
-        else:
-            payload["content"] = content.decode("utf-8", errors="surrogateescape")
-        await call(self._ctx, "fs.write", payload)
+        data = content.encode() if isinstance(content, str) else content
+        chunked = len(data) > CHUNK_SIZE
+        chunks = (len(data) + CHUNK_SIZE - 1) // CHUNK_SIZE if chunked else 1
+        params: Dict[str, Any] = {
+            "path": path,
+            "size": len(data),
+            "sandbox_id": self._ctx.sandbox_id,
+        }
+        if chunked:
+            params["chunked"] = True
+            params["chunks"] = chunks
+        await self._ctx.transport.call_with_binary("fs.write", params, data)
 
     async def list(self, path: str) -> List[str]:
         """List entries in a directory."""
@@ -50,11 +58,17 @@ class FsCategory:
 
     async def upload(self, path: str, tar: bytes) -> None:
         """Upload a tar archive and extract it at *path*."""
-        await call(self._ctx, "fs.upload", {"path": path, "tar": tar})
+        await self._ctx.transport.call_with_binary(
+            "fs.upload",
+            {"path": path, "size": len(tar), "sandbox_id": self._ctx.sandbox_id},
+            tar,
+        )
 
     async def download(self, path: str) -> bytes:
         """Download *path* as a tar archive."""
-        result = await call(self._ctx, "fs.download", {"path": path})
-        if isinstance(result, bytes):
-            return result
-        return bytes(result)
+        result, bufs = await self._ctx.transport.call_expect_binary(
+            "fs.download", {"path": path, "sandbox_id": self._ctx.sandbox_id}
+        )
+        if not bufs:
+            raise SandboxError("no binary data received for fs.download")
+        return b"".join(bufs)

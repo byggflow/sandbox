@@ -9,11 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .errors import ConnectionError, RpcError, SessionReplacedError
 
 MAX_FRAME_SIZE = 10 * 1024 * 1024  # 10MB
+CHUNK_SIZE = 1 * 1024 * 1024  # 1MB
 
 
 class RpcTransport(ABC):
@@ -22,6 +23,25 @@ class RpcTransport(ABC):
     @abstractmethod
     async def send(self, op: str, params: Dict[str, Any]) -> Any:
         """Send an RPC request and return the result payload."""
+        ...
+
+    @abstractmethod
+    async def call_with_binary(
+        self, method: str, params: Dict[str, Any], data: bytes
+    ) -> Any:
+        """Send a JSON-RPC request followed by binary data chunks, return the JSON response."""
+        ...
+
+    @abstractmethod
+    async def call_expect_binary(
+        self, method: str, params: Dict[str, Any]
+    ) -> Tuple[Any, List[bytes]]:
+        """Send a JSON-RPC request and collect binary frames before the JSON response."""
+        ...
+
+    @abstractmethod
+    async def send_binary(self, data: bytes) -> None:
+        """Send raw binary data, chunking at CHUNK_SIZE."""
         ...
 
     @abstractmethod
@@ -41,6 +61,8 @@ class WsTransport(RpcTransport):
         self._replaced_handlers: list[Callable[[], None]] = []
         self._binary_handler: Optional[Callable[[bytes], None]] = None
         self._read_task: Optional[asyncio.Task[None]] = None
+        self._binary_expect_id: int = 0
+        self._binary_bufs: Dict[int, list[bytes]] = {}
 
     async def connect(self, url: str, headers: Optional[Dict[str, str]] = None) -> None:
         """Open a WebSocket connection and start the read loop."""
@@ -55,7 +77,13 @@ class WsTransport(RpcTransport):
         try:
             async for message in self._ws:
                 if isinstance(message, bytes):
-                    if self._binary_handler is not None:
+                    # Route to binary-expecting request if one is active.
+                    if self._binary_expect_id != 0:
+                        req_id = self._binary_expect_id
+                        if req_id not in self._binary_bufs:
+                            self._binary_bufs[req_id] = []
+                        self._binary_bufs[req_id].append(message)
+                    elif self._binary_handler is not None:
                         handler = self._binary_handler
                         self._binary_handler = None
                         handler(message)
@@ -143,15 +171,66 @@ class WsTransport(RpcTransport):
         self._replaced_handlers.append(handler)
 
     async def send_binary(self, data: bytes) -> None:
-        """Send a binary WebSocket message."""
+        """Send binary data, chunking at CHUNK_SIZE."""
         if self._ws is None:
             raise ConnectionError("WebSocket not connected")
-        if len(data) > MAX_FRAME_SIZE:
-            raise RpcError(
-                f"frame size {len(data)} exceeds maximum {MAX_FRAME_SIZE}",
-                -32000,
-            )
-        await self._ws.send(data)
+        offset = 0
+        while offset < len(data):
+            end = min(offset + CHUNK_SIZE, len(data))
+            chunk = data[offset:end]
+            await self._ws.send(chunk)
+            offset = end
+
+    async def call_with_binary(
+        self, method: str, params: Dict[str, Any], data: bytes
+    ) -> Any:
+        """Send a JSON-RPC request, then send binary data in chunks, wait for JSON response."""
+        if self._ws is None:
+            raise ConnectionError("WebSocket not connected")
+
+        req_id = self._next_id
+        self._next_id += 1
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        self._pending[req_id] = future
+
+        message = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+        await self._ws.send(message)
+
+        # Send binary data in chunks.
+        await self.send_binary(data)
+
+        return await future
+
+    async def call_expect_binary(
+        self, method: str, params: Dict[str, Any]
+    ) -> Tuple[Any, List[bytes]]:
+        """Send a JSON-RPC request and collect binary frames arriving before the JSON response."""
+        if self._ws is None:
+            raise ConnectionError("WebSocket not connected")
+
+        req_id = self._next_id
+        self._next_id += 1
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        self._pending[req_id] = future
+
+        # Tell the read loop to collect binary frames for this request.
+        self._binary_expect_id = req_id
+        self._binary_bufs[req_id] = []
+
+        message = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+        await self._ws.send(message)
+
+        result = await future
+
+        # Collect and clean up binary buffers.
+        self._binary_expect_id = 0
+        bufs = self._binary_bufs.pop(req_id, [])
+
+        return result, bufs
 
     def on_binary(self, handler: Callable[[bytes], None]) -> None:
         """Register a one-shot binary message handler."""
