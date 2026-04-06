@@ -1,0 +1,26 @@
+{
+  "name": "@byggflow/sandbox-mcp",
+  "version": "0.0.1",
+  "description": "MCP server for isolated code execution via sandboxd",
+  "type": "module",
+  "bin": {
+    "sandbox-mcp": "src/index.ts"
+  },
+  "files": ["src", "dist"],
+  "scripts": {
+    "start": "bun src/index.ts",
+    "test": "bunx --bun vitest run",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm"
+  },
+  "dependencies": {
+    "@byggflow/sandbox": "file:../sdk/typescript",
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "vitest": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
