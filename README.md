@@ -18,7 +18,7 @@ Built and maintained by [Byggflow](https://byggflow.com).
 ### Prerequisites
 
 - Linux host with Docker installed
-- Go 1.23+ (for building from source)
+- Go 1.25+ (for building from source)
 
 ### Install from source
 
@@ -51,8 +51,8 @@ services:
       - sandboxd-sock:/var/run/sandboxd
       - sandboxd-data:/var/lib/sandboxd
     environment:
-      - SANDBOXD_LISTEN=/var/run/sandboxd/sandboxd.sock
-      - SANDBOXD_LISTEN_TCP=0.0.0.0:7522
+      - SANDBOX_SOCKET=/var/run/sandboxd/sandboxd.sock
+      - SANDBOX_TCP=0.0.0.0:7522
 
 volumes:
   sandboxd-sock:
@@ -85,8 +85,8 @@ import { createSandbox } from "@byggflow/sandbox";
 // Connects to /var/run/sandboxd/sandboxd.sock by default
 const sbx = await createSandbox();
 
-await sbx.fs.write("/app/main.py", "print('hello')");
-const result = await sbx.process.exec("python /app/main.py");
+await sbx.fs.write("/root/main.py", "print('hello')");
+const result = await sbx.process.exec("python /root/main.py");
 console.log(result.stdout); // "hello\n"
 
 await sbx.close();
@@ -113,19 +113,43 @@ if err != nil {
 }
 defer sbx.Close(ctx)
 
-err = sbx.FS().Write(ctx, "/app/main.py", []byte("print('hello')"))
-result, err := sbx.Process().Exec(ctx, "python /app/main.py")
+err = sbx.FS().Write(ctx, "/root/main.py", []byte("print('hello')"))
+result, err := sbx.Process().Exec(ctx, "python /root/main.py")
 fmt.Println(result.Stdout) // "hello\n"
 ```
+
+### MCP server
+
+The MCP server lets AI agents (Claude, etc.) create and interact with sandboxes directly as tool calls.
+
+```bash
+npm install @byggflow/sandbox-mcp
+```
+
+Add to your MCP client config (e.g. `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "sandbox": {
+      "command": "npx",
+      "args": ["@byggflow/sandbox-mcp"]
+    }
+  }
+}
+```
+
+The MCP server auto-starts a `sandboxd` container via Docker if no daemon is already running. Set `SANDBOX_ENDPOINT` and `SANDBOX_AUTH` to connect to a remote instance instead.
 
 ## Architecture
 
 ```
-CLI / SDK
+CLI / SDK / MCP
     │
     │  HTTP + WebSocket over Unix socket (or TCP)
     ▼
 sandboxd (daemon)
+    ├── Warm Pool (pre-started containers, <5ms allocation)
     │
     │  Binary-framed protocol over TCP
     ▼
@@ -216,6 +240,14 @@ See [`config/sandboxd.example.toml`](config/sandboxd.example.toml) for the full 
 
 Configuration supports hot-reload on file change or `SIGHUP`. Listen addresses require a restart; all other settings are applied live.
 
+Environment variables override config file values:
+
+| Variable | Config field |
+|---|---|
+| `SANDBOX_SOCKET` | `server.socket` |
+| `SANDBOX_TCP` | `server.tcp` |
+| `SANDBOX_DATA_DIR` | `server.data_dir` |
+
 ## Security
 
 sandboxd is designed to run untrusted code. Every sandbox is locked down by default — no opt-in required.
@@ -224,11 +256,11 @@ sandboxd is designed to run untrusted code. Every sandbox is locked down by defa
 
 | Control | Detail |
 |---|---|
-| Read-only rootfs | Writable tmpfs only for `/tmp` and `/home/sandbox` |
+| Read-only rootfs | Writable tmpfs only for `/tmp` and `/root` |
 | All capabilities dropped | `--cap-drop ALL` — no privileged operations |
 | No new privileges | `--security-opt no-new-privileges` |
 | PID limit | 256 by default — prevents fork bombs |
-| File size limit | Enforced via ulimit |
+| Tmpfs size caps | `/tmp` 100MB, `/root` 500MB — bounds disk usage per sandbox |
 | Memory and CPU caps | Per-sandbox cgroup limits, hard-capped by daemon config |
 
 ### Network isolation
@@ -256,8 +288,8 @@ The SDK and guest agent perform a key exchange (X25519) on connect. All payloads
 
 ### Prerequisites
 
-- Go 1.23+
-- [Bun](https://bun.sh) (for TypeScript SDK)
+- Go 1.25+
+- [Bun](https://bun.sh) (for TypeScript SDK and MCP server)
 
 ### Build
 
@@ -272,8 +304,13 @@ make test           # run Go + TypeScript tests
 # Go
 go test ./...
 
-# TypeScript
-cd sdks/typescript
+# TypeScript SDK
+cd sdk/typescript
+bun install
+bunx --bun vitest run
+
+# MCP server
+cd mcp
 bun install
 bunx --bun vitest run
 ```

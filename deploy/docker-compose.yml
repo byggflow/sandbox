@@ -6,8 +6,8 @@ services:
       - sandboxd-sock:/var/run/sandboxd
       - sandboxd-data:/var/lib/sandboxd
     environment:
-      - SANDBOXD_LISTEN=/var/run/sandboxd/sandboxd.sock
-      - SANDBOXD_LISTEN_TCP=0.0.0.0:7522
+      - SANDBOX_SOCKET=/var/run/sandboxd/sandboxd.sock
+      - SANDBOX_TCP=0.0.0.0:7522
 
 volumes:
   sandboxd-sock:
