@@ -35,6 +35,20 @@ export interface ExecResult {
   exitCode: number;
 }
 
+/** Event emitted during streaming exec. */
+export interface OutputEvent {
+  stream: "stdout" | "stderr";
+  data: string;
+}
+
+/** Handle for a streaming exec call. */
+export interface StreamExecHandle {
+  /** Async iterator that yields output events as they arrive. */
+  output: AsyncIterable<OutputEvent>;
+  /** Returns the exit code once the process completes. */
+  exitCode: Promise<number>;
+}
+
 export interface SpawnHandle {
   stdout: AsyncIterable<Uint8Array>;
   stderr: AsyncIterable<Uint8Array>;
@@ -67,6 +81,7 @@ export interface Sandbox {
   };
   process: {
     exec(command: string, opts?: { env?: Record<string, string>; timeout?: number }): Promise<ExecResult>;
+    streamExec(command: string, opts?: { env?: Record<string, string>; timeout?: number; cwd?: string }): StreamExecHandle;
     spawn(command: string, opts?: { env?: Record<string, string> }): SpawnHandle;
     pty(opts?: { command?: string; cols?: number; rows?: number; env?: Record<string, string> }): PtyHandle;
   };
@@ -110,33 +125,38 @@ function buildSandbox(id: string, transport: RpcTransport): Sandbox {
 
     fs: {
       async read(path: string): Promise<Uint8Array> {
-        return new Promise<Uint8Array>((resolve, reject) => {
-          let binaryData: Uint8Array | null = null;
-
-          transport.onBinary((data) => {
-            binaryData = data;
-          });
-
-          call(ctx, { method: "fs.read", params: { path } })
-            .then(() => {
-              if (binaryData) {
-                resolve(binaryData);
-              } else {
-                reject(new Error("No binary data received for fs.read"));
-              }
-            })
-            .catch(reject);
-        });
+        const { binary } = await transport.callExpectBinary("fs.read", { path });
+        if (binary.length === 0) {
+          throw new Error("No binary data received for fs.read");
+        }
+        if (binary.length === 1) {
+          return binary[0];
+        }
+        // Reassemble chunked response.
+        let totalLen = 0;
+        for (const b of binary) totalLen += b.byteLength;
+        const merged = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const b of binary) {
+          merged.set(b, offset);
+          offset += b.byteLength;
+        }
+        return merged;
       },
 
       async write(path: string, content: string | Uint8Array): Promise<void> {
         const data = typeof content === "string" ? new TextEncoder().encode(content) : content;
-        // Send the RPC and binary data without awaiting in between — the agent
-        // reads the binary frame as part of handling fs.write, so it must arrive
-        // before the agent can respond.
-        const result = call(ctx, { method: "fs.write", params: { path, size: data.byteLength } });
-        transport.sendBinary(data);
-        await result;
+        const chunkSize = 1024 * 1024; // 1MB
+        const chunked = data.byteLength > chunkSize;
+        const chunks = chunked ? Math.ceil(data.byteLength / chunkSize) : 1;
+
+        const params: Record<string, unknown> = { path, size: data.byteLength };
+        if (chunked) {
+          params.chunked = true;
+          params.chunks = chunks;
+        }
+
+        await transport.callWithBinary("fs.write", params, data);
       },
 
       async list(path: string): Promise<string[]> {
@@ -158,29 +178,27 @@ function buildSandbox(id: string, transport: RpcTransport): Sandbox {
       },
 
       async upload(path: string, tar: Uint8Array): Promise<void> {
-        const result = call(ctx, { method: "fs.upload", params: { path, size: tar.byteLength } });
-        transport.sendBinary(tar);
-        await result;
+        await transport.callWithBinary("fs.upload", { path, size: tar.byteLength }, tar);
       },
 
       async download(path: string): Promise<Uint8Array> {
-        return new Promise<Uint8Array>((resolve, reject) => {
-          let binaryData: Uint8Array | null = null;
-
-          transport.onBinary((data) => {
-            binaryData = data;
-          });
-
-          call(ctx, { method: "fs.download", params: { path } })
-            .then(() => {
-              if (binaryData) {
-                resolve(binaryData);
-              } else {
-                reject(new Error("No binary data received for fs.download"));
-              }
-            })
-            .catch(reject);
-        });
+        const { binary } = await transport.callExpectBinary("fs.download", { path });
+        if (binary.length === 0) {
+          throw new Error("No binary data received for fs.download");
+        }
+        if (binary.length === 1) {
+          return binary[0];
+        }
+        // Reassemble chunked response.
+        let totalLen = 0;
+        for (const b of binary) totalLen += b.byteLength;
+        const merged = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const b of binary) {
+          merged.set(b, offset);
+          offset += b.byteLength;
+        }
+        return merged;
       },
     },
 
@@ -195,6 +213,78 @@ function buildSandbox(id: string, transport: RpcTransport): Sandbox {
           stderr: (result.stderr as string) ?? "",
           exitCode: (result.exit_code as number) ?? -1,
         };
+      },
+
+      streamExec(command: string, opts?: { env?: Record<string, string>; timeout?: number; cwd?: string }): StreamExecHandle {
+        const params: Record<string, unknown> = { command };
+        if (opts?.env) params.env = opts.env;
+        if (opts?.timeout) params.timeout = opts.timeout;
+        if (opts?.cwd) params.cwd = opts.cwd;
+
+        // Buffer for output events, with a queue and waiters for async iteration.
+        const queue: OutputEvent[] = [];
+        let done = false;
+        let waiter: ((value: IteratorResult<OutputEvent>) => void) | null = null;
+
+        const push = (event: OutputEvent) => {
+          if (waiter) {
+            const w = waiter;
+            waiter = null;
+            w({ value: event, done: false });
+          } else {
+            queue.push(event);
+          }
+        };
+
+        const finish = () => {
+          done = true;
+          if (waiter) {
+            const w = waiter;
+            waiter = null;
+            w({ value: undefined as unknown as OutputEvent, done: true });
+          }
+        };
+
+        // Register notification handler for process.output events.
+        transport.onNotification((method: string, notifParams: unknown) => {
+          if (method !== "process.output") return;
+          const p = notifParams as Record<string, unknown>;
+          push({
+            stream: p.stream as "stdout" | "stderr",
+            data: p.data as string,
+          });
+        });
+
+        // Make the RPC call. The response arrives when the process finishes.
+        const rpcPromise = call(ctx, { method: "process.stream", params }) as Promise<Record<string, unknown>>;
+
+        const exitCodePromise = rpcPromise.then((result) => {
+          finish();
+          return (result.exit_code as number) ?? -1;
+        }).catch((err) => {
+          finish();
+          throw err;
+        });
+
+        const output: AsyncIterable<OutputEvent> = {
+          [Symbol.asyncIterator]() {
+            return {
+              next(): Promise<IteratorResult<OutputEvent>> {
+                if (queue.length > 0) {
+                  return Promise.resolve({ value: queue.shift()!, done: false });
+                }
+                if (done) {
+                  return Promise.resolve({ value: undefined as unknown as OutputEvent, done: true });
+                }
+                return new Promise((resolve) => {
+                  waiter = resolve;
+                });
+              },
+            };
+          },
+        };
+
+        return { output, exitCode: exitCodePromise };
       },
 
       spawn(_command: string, _opts?: { env?: Record<string, string> }): SpawnHandle {

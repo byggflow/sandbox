@@ -65,6 +65,19 @@ class EncryptedTransport implements RpcTransport {
     return this.decryptResult(result);
   }
 
+  async callWithBinary(method: string, params: unknown, data: Uint8Array): Promise<unknown> {
+    const encrypted = await this.encryptParams(params);
+    const result = await this.inner.callWithBinary(method, encrypted, data);
+    return this.decryptResult(result);
+  }
+
+  async callExpectBinary(method: string, params: unknown): Promise<{ result: unknown; binary: Uint8Array[] }> {
+    const encrypted = await this.encryptParams(params);
+    const { result, binary } = await this.inner.callExpectBinary(method, encrypted);
+    const decrypted = await this.decryptResult(result);
+    return { result: decrypted, binary };
+  }
+
   async notify(method: string, params: unknown): Promise<void> {
     const encrypted = await this.encryptParams(params);
     this.inner.notify(method, encrypted);
