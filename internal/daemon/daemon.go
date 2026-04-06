@@ -200,6 +200,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	profile := req.Profile
 	memory := int64(0)
 	cpu := 0.0
+	storage := "500m"
 	templateID := ""
 
 	// If a template is specified, resolve the image from the template.
@@ -227,6 +228,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		}
 		memory = mem
 		cpu = base.CPU
+		storage = base.StorageOrDefault()
 	}
 
 	if image == "" {
@@ -243,6 +245,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		}
 		memory = mem
 		cpu = base.CPU
+		storage = base.StorageOrDefault()
 	}
 
 	// Override with request-level limits (only if lower than config max).
@@ -257,6 +260,12 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	}
 	if req.CPU > 0 && req.CPU <= d.Config.Limits.MaxCPU {
 		cpu = req.CPU
+	}
+	if req.Storage != "" {
+		if _, err := parseByteSize(req.Storage); err != nil {
+			return nil, fmt.Errorf("invalid storage size: %w", err)
+		}
+		storage = req.Storage
 	}
 
 	// Validate TTL: clamp to per-request limit, then to global limit.
@@ -320,7 +329,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 
 	// Cold start: create a new container.
 	d.Log.Info("cold starting sandbox", "id", sbxID, "image", image)
-	containerID, agentAddr, err := d.createContainer(ctx, image, memory, cpu, authToken)
+	containerID, agentAddr, err := d.createContainer(ctx, image, memory, cpu, storage, authToken)
 	if err != nil {
 		return nil, fmt.Errorf("create container: %w", err)
 	}
@@ -453,7 +462,7 @@ func (d *Daemon) ConnectAgent(sbx *Sandbox) (*proxy.AgentConn, error) {
 
 // createContainer creates and starts a new Docker container, waits for the
 // agent to be reachable, and returns the container ID and agent address.
-func (d *Daemon) createContainer(ctx context.Context, image string, memory int64, cpu float64, authToken string) (string, string, error) {
+func (d *Daemon) createContainer(ctx context.Context, image string, memory int64, cpu float64, storage string, authToken string) (string, string, error) {
 	nanoCPUs := int64(cpu * 1e9)
 
 	var envVars []string
@@ -479,8 +488,8 @@ func (d *Daemon) createContainer(ctx context.Context, image string, memory int64
 				PidsLimit: ptrInt64(256),
 			},
 			Tmpfs: map[string]string{
-				"/tmp":          "rw,noexec,nosuid,size=100m",
-				"/root": "rw,nosuid,size=500m",
+				"/tmp":  "rw,noexec,nosuid,size=100m",
+				"/root": "rw,nosuid,size=" + storage,
 			},
 		},
 		&network.NetworkingConfig{
@@ -649,6 +658,7 @@ type CreateRequest struct {
 	Template string            `json:"template"`
 	Memory   string            `json:"memory"`
 	CPU      float64           `json:"cpu"`
+	Storage  string            `json:"storage"` // tmpfs size for /root (e.g. "500m", "1g"). Overrides profile default.
 	TTL      int               `json:"ttl"`
 	Labels   map[string]string `json:"labels"`
 }

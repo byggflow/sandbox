@@ -84,7 +84,7 @@ func (m *Manager) Start(ctx context.Context) error {
 			m.log.Info("pre-warming pool", "profile", profile, "image", base.Image, "count", count)
 
 			for i := 0; i < count; i++ {
-				wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU)
+				wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault())
 				if err != nil {
 					m.log.Error("failed to create warm container", "profile", profile, "error", err)
 					continue
@@ -216,7 +216,7 @@ func (m *Manager) Resize(ctx context.Context, profile string, count int) error {
 		}
 		m.mu.Unlock()
 
-		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU)
+		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault())
 		if err != nil {
 			return fmt.Errorf("create warm container: %w", err)
 		}
@@ -275,7 +275,7 @@ func (m *Manager) Flush(ctx context.Context, profile string) error {
 	// Recreate.
 	count := m.cfg.MinBase
 	for i := 0; i < count; i++ {
-		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU)
+		wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU, base.StorageOrDefault())
 		if err != nil {
 			m.log.Error("failed to recreate warm container", "profile", profile, "error", err)
 			continue
@@ -289,7 +289,7 @@ func (m *Manager) Flush(ctx context.Context, profile string) error {
 }
 
 // createWarm creates and starts a single warm container.
-func (m *Manager) createWarm(ctx context.Context, image, profile string, memory int64, cpu float64) (*WarmContainer, error) {
+func (m *Manager) createWarm(ctx context.Context, image, profile string, memory int64, cpu float64, storage string) (*WarmContainer, error) {
 	nanoCPUs := int64(cpu * 1e9)
 
 	// Generate auth token for this warm container.
@@ -319,8 +319,8 @@ func (m *Manager) createWarm(ctx context.Context, image, profile string, memory 
 				PidsLimit: ptrInt64(256),
 			},
 			Tmpfs: map[string]string{
-				"/tmp":          "rw,noexec,nosuid,size=100m",
-				"/root": "rw,nosuid,size=500m",
+				"/tmp":  "rw,noexec,nosuid,size=100m",
+				"/root": "rw,nosuid,size=" + storage,
 			},
 		},
 		&network.NetworkingConfig{

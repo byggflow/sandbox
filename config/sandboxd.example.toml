@@ -56,8 +56,10 @@ liveness_timeout = "5ms"          # ping timeout on warm pool assignment
 image = "byggflow/sandbox-base:latest"
 memory = "512m"
 cpu = 1.0
+storage = "500m"              # tmpfs size for /root workspace
 
 [pool.base.python]
 image = "byggflow/sandbox-python:latest"
 memory = "1g"
 cpu = 2.0
+storage = "1g"

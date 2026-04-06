@@ -616,18 +616,20 @@ func (d *Daemon) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 	type profileEntry struct {
-		Name   string  `json:"name"`
-		Image  string  `json:"image"`
-		Memory string  `json:"memory"`
-		CPU    float64 `json:"cpu"`
+		Name    string  `json:"name"`
+		Image   string  `json:"image"`
+		Memory  string  `json:"memory"`
+		CPU     float64 `json:"cpu"`
+		Storage string  `json:"storage"`
 	}
 	profiles := []profileEntry{}
 	for name, base := range d.Config.Pool.Base {
 		profiles = append(profiles, profileEntry{
-			Name:   name,
-			Image:  base.Image,
-			Memory: base.Memory,
-			CPU:    base.CPU,
+			Name:    name,
+			Image:   base.Image,
+			Memory:  base.Memory,
+			CPU:     base.CPU,
+			Storage: base.StorageOrDefault(),
 		})
 	}
 	slices.SortFunc(profiles, func(a, b profileEntry) int {

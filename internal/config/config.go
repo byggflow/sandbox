@@ -73,9 +73,10 @@ type PoolConfig struct {
 
 // BaseImageConfig defines a pool base image profile.
 type BaseImageConfig struct {
-	Image  string  `toml:"image"`
-	Memory string  `toml:"memory"`
-	CPU    float64 `toml:"cpu"`
+	Image   string  `toml:"image"`
+	Memory  string  `toml:"memory"`
+	CPU     float64 `toml:"cpu"`
+	Storage string  `toml:"storage"` // tmpfs size for /root (e.g. "500m", "1g"). Defaults to "500m".
 }
 
 // MaxMemoryBytes parses MaxMemory as bytes.
@@ -101,6 +102,14 @@ func (p *PoolConfig) LivenessTimeoutDuration() (time.Duration, error) {
 // MemoryBytes parses Memory as bytes for a base image config.
 func (b *BaseImageConfig) MemoryBytes() (int64, error) {
 	return parseByteSize(b.Memory)
+}
+
+// StorageOrDefault returns the storage size string, defaulting to "500m" if empty.
+func (b *BaseImageConfig) StorageOrDefault() string {
+	if b.Storage == "" {
+		return "500m"
+	}
+	return b.Storage
 }
 
 // Defaults returns a Config with sensible default values.
@@ -133,9 +142,10 @@ func Defaults() Config {
 			LivenessTimeout: "5ms",
 			Base: map[string]BaseImageConfig{
 				"default": {
-					Image:  "byggflow/sandbox-base:latest",
-					Memory: "512m",
-					CPU:    1.0,
+					Image:   "byggflow/sandbox-base:latest",
+					Memory:  "512m",
+					CPU:     1.0,
+					Storage: "500m",
 				},
 			},
 		},
@@ -199,6 +209,13 @@ func (c *Config) validate() error {
 	}
 	if c.Pool.MaxWarm < c.Pool.TotalWarm {
 		return fmt.Errorf("pool.max_warm must be >= pool.total_warm")
+	}
+	for name, base := range c.Pool.Base {
+		if base.Storage != "" {
+			if _, err := parseByteSize(base.Storage); err != nil {
+				return fmt.Errorf("pool.base.%s.storage: %w", name, err)
+			}
+		}
 	}
 	return nil
 }
