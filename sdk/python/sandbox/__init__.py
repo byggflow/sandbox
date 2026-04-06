@@ -23,7 +23,7 @@ from .errors import (
     TimeoutError,
 )
 from .fs import FsCategory
-from .net import NetCategory
+from .net import NetCategory, TunnelInfo
 from .process import ExecResult, OutputEvent, ProcessCategory, PtyHandle, SpawnHandle, StreamExecHandle
 from .sandbox import (
     DEFAULT_ENDPOINT,
@@ -50,6 +50,7 @@ __all__ = [
     "ProcessCategory",
     "EnvCategory",
     "NetCategory",
+    "TunnelInfo",
     "TemplateCategory",
     "TemplateManager",
     # Process handles

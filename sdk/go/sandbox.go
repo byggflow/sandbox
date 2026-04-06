@@ -65,7 +65,13 @@ func (s *Sandbox) Env() *EnvCategory {
 
 // Net returns the network category for this sandbox.
 func (s *Sandbox) Net() *NetCategory {
-	return &NetCategory{cc: s.cc}
+	return &NetCategory{
+		cc:          s.cc,
+		httpClient:  s.httpClient,
+		httpBaseURL: s.httpBaseURL,
+		authHeaders: s.authHeaders,
+		sandboxID:   s.ID,
+	}
 }
 
 // Template returns the template category for this sandbox.

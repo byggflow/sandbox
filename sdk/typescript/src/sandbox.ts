@@ -67,6 +67,12 @@ export interface PtyHandle {
   wait(): Promise<{ exitCode: number }>;
 }
 
+export interface TunnelInfo {
+  port: number;
+  host_port: number;
+  url: string;
+}
+
 export interface Sandbox {
   id: string;
   fs: {
@@ -93,6 +99,10 @@ export interface Sandbox {
   };
   net: {
     fetch(url: string, opts?: RequestInit): Promise<Response>;
+    url(port: number): string;
+    expose(port: number, opts?: { timeout?: number }): Promise<TunnelInfo>;
+    close(port: number): Promise<void>;
+    ports(): Promise<TunnelInfo[]>;
   };
   template: {
     save(opts?: { label?: string }): Promise<{ id: string }>;
@@ -117,8 +127,9 @@ function resolveEndpoints(endpoint: string): { http: string; ws: string } {
 }
 
 /** Build a Sandbox object from a connected transport. */
-function buildSandbox(id: string, transport: RpcTransport): Sandbox {
+function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, authHeaders?: Record<string, string>): Sandbox {
   const ctx: CallContext = { transport, sandboxId: id };
+  const base = httpBase ?? "http://localhost:7522";
 
   return {
     id,
@@ -338,6 +349,47 @@ function buildSandbox(id: string, transport: RpcTransport): Sandbox {
           headers: result.headers as Record<string, string>,
         });
       },
+
+      url(port: number): string {
+        return `${base}/sandboxes/${id}/ports/${port}`;
+      },
+
+      async expose(port: number, opts?: { timeout?: number }): Promise<TunnelInfo> {
+        const body: Record<string, unknown> = {};
+        if (opts?.timeout) body.timeout = opts.timeout;
+        const resp = await fetch(`${base}/sandboxes/${id}/ports/${port}/expose`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(`expose failed (status ${resp.status}): ${text}`);
+        }
+        return await resp.json() as TunnelInfo;
+      },
+
+      async close(port: number): Promise<void> {
+        const resp = await fetch(`${base}/sandboxes/${id}/ports/${port}/expose`, {
+          method: "DELETE",
+          headers: { ...authHeaders },
+        });
+        if (!resp.ok && resp.status !== 404) {
+          const text = await resp.text();
+          throw new Error(`close failed (status ${resp.status}): ${text}`);
+        }
+      },
+
+      async ports(): Promise<TunnelInfo[]> {
+        const resp = await fetch(`${base}/sandboxes/${id}/ports`, {
+          headers: { ...authHeaders },
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(`ports failed (status ${resp.status}): ${text}`);
+        }
+        return await resp.json() as TunnelInfo[];
+      },
     },
 
     template: {
@@ -409,7 +461,7 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
     transport = await negotiateE2E(wsTransport);
   }
 
-  return buildSandbox(sandboxId, transport);
+  return buildSandbox(sandboxId, transport, http, headers);
 }
 
 export async function connectSandbox(id: string, opts?: ConnectOptions): Promise<Sandbox> {
@@ -431,5 +483,6 @@ export async function connectSandbox(id: string, opts?: ConnectOptions): Promise
     transport = await negotiateE2E(wsTransport);
   }
 
-  return buildSandbox(id, transport);
+  const { http: httpBase } = resolveEndpoints(endpoint);
+  return buildSandbox(id, transport, httpBase, headers);
 }

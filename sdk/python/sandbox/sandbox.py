@@ -53,11 +53,17 @@ class Sandbox:
     - ``sandbox.fs``  — filesystem operations
     - ``sandbox.process``  — process execution
     - ``sandbox.env``  — environment variables
-    - ``sandbox.net``  — network proxying
+    - ``sandbox.net``  — network proxying and port tunneling
     - ``sandbox.template``  — template snapshotting
     """
 
-    def __init__(self, sandbox_id: str, transport: RpcTransport) -> None:
+    def __init__(
+        self,
+        sandbox_id: str,
+        transport: RpcTransport,
+        http_base: str = "http://localhost:7522",
+        auth_headers: Optional[Dict[str, str]] = None,
+    ) -> None:
         self._id = sandbox_id
         self._transport = transport
         self._ctx = CallContext(sandbox_id=sandbox_id, transport=transport)
@@ -65,7 +71,7 @@ class Sandbox:
         self._fs = FsCategory(self._ctx)
         self._process = ProcessCategory(self._ctx)
         self._env = EnvCategory(self._ctx)
-        self._net = NetCategory(self._ctx)
+        self._net = NetCategory(self._ctx, http_base=http_base, auth_headers=auth_headers)
         self._template = TemplateCategory(self._ctx)
 
     @property
@@ -172,7 +178,7 @@ async def create_sandbox(opts: Optional[SandboxOptions] = None) -> Sandbox:
 
         transport = await negotiate_e2e(ws_transport)
 
-    return Sandbox(sandbox_id, transport)
+    return Sandbox(sandbox_id, transport, http_base=http_base, auth_headers=dict(headers))
 
 
 async def connect_sandbox(
@@ -181,7 +187,7 @@ async def connect_sandbox(
 ) -> Sandbox:
     """Connect to an existing sandbox by id."""
     opts = opts or ConnectOptions()
-    _, ws_base = _resolve_endpoints(opts.endpoint)
+    http_base, ws_base = _resolve_endpoints(opts.endpoint)
 
     if isinstance(opts.auth, RequestSigner):
         headers = await opts.auth.resolve_for_request("GET", f"/sandboxes/{sandbox_id}/ws")
@@ -197,4 +203,5 @@ async def connect_sandbox(
 
         transport = await negotiate_e2e(ws_transport)
 
-    return Sandbox(sandbox_id, transport)
+    http_base, _ = _resolve_endpoints(opts.endpoint)
+    return Sandbox(sandbox_id, transport, http_base=http_base, auth_headers=dict(headers))
