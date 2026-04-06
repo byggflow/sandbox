@@ -38,6 +38,9 @@ func main() {
 		log.Info("using default config (no --config specified)")
 	}
 
+	// Apply environment variable overrides (take precedence over config file).
+	cfg.ApplyEnvOverrides()
+
 	// Create daemon.
 	d, err := daemon.New(cfg, log)
 	if err != nil {

@@ -163,6 +163,24 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// ApplyEnvOverrides applies environment variable overrides to the config.
+// Environment variables take precedence over config file values.
+//
+//   - SANDBOX_SOCKET   → server.socket
+//   - SANDBOX_TCP      → server.tcp
+//   - SANDBOX_DATA_DIR → server.data_dir
+func (c *Config) ApplyEnvOverrides() {
+	if v := os.Getenv("SANDBOX_SOCKET"); v != "" {
+		c.Server.Socket = v
+	}
+	if v := os.Getenv("SANDBOX_TCP"); v != "" {
+		c.Server.TCP = v
+	}
+	if v := os.Getenv("SANDBOX_DATA_DIR"); v != "" {
+		c.Server.DataDir = v
+	}
+}
+
 func (c *Config) validate() error {
 	if c.Server.Socket == "" {
 		return fmt.Errorf("server.socket is required")

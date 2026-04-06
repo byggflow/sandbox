@@ -525,6 +525,15 @@ func (d *Daemon) createContainer(ctx context.Context, image string, memory int64
 	for attempt := 0; attempt < 30; attempt++ {
 		agent, err := proxy.Dial(agentAddr, 2*time.Second)
 		if err == nil {
+			// Authenticate first when token is set (agent requires auth as first message).
+			if authToken != "" {
+				if authErr := agent.Authenticate(authToken, 2*time.Second); authErr != nil {
+					agent.Close()
+					lastErr = authErr
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+			}
 			if pingErr := agent.Ping(2 * time.Second); pingErr == nil {
 				agent.Close()
 				return resp.ID, agentAddr, nil
@@ -558,7 +567,7 @@ func (d *Daemon) ensureNetwork(ctx context.Context) (string, error) {
 		}
 	}
 
-	// Create it. ICC is always disabled to prevent container-to-container communication.
+	// Create it. ICC is disabled to prevent container-to-container communication.
 	netResp, err := d.Docker.NetworkCreate(ctx, name, network.CreateOptions{
 		Driver: "bridge",
 		Options: map[string]string{

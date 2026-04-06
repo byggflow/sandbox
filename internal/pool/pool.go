@@ -69,27 +69,32 @@ func NewManager(docker *client.Client, cfg config.PoolConfig, networkID, network
 
 // Start initializes the warm pool and starts background maintenance.
 func (m *Manager) Start(ctx context.Context) error {
-	// Create initial warm containers for each base image.
-	for profile, base := range m.cfg.Base {
-		mem, err := base.MemoryBytes()
-		if err != nil {
-			return fmt.Errorf("parse memory for profile %s: %w", profile, err)
-		}
-
-		count := m.cfg.MinBase
-		m.log.Info("pre-warming pool", "profile", profile, "image", base.Image, "count", count)
-
-		for i := 0; i < count; i++ {
-			wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU)
+	// Pre-warm containers asynchronously so the daemon can start serving immediately.
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		for profile, base := range m.cfg.Base {
+			mem, err := base.MemoryBytes()
 			if err != nil {
-				m.log.Error("failed to create warm container", "profile", profile, "error", err)
+				m.log.Error("parse memory for pool profile", "profile", profile, "error", err)
 				continue
 			}
-			m.mu.Lock()
-			m.warm[base.Image] = append(m.warm[base.Image], wc)
-			m.mu.Unlock()
+
+			count := m.cfg.MinBase
+			m.log.Info("pre-warming pool", "profile", profile, "image", base.Image, "count", count)
+
+			for i := 0; i < count; i++ {
+				wc, err := m.createWarm(ctx, base.Image, profile, mem, base.CPU)
+				if err != nil {
+					m.log.Error("failed to create warm container", "profile", profile, "error", err)
+					continue
+				}
+				m.mu.Lock()
+				m.warm[base.Image] = append(m.warm[base.Image], wc)
+				m.mu.Unlock()
+			}
 		}
-	}
+	}()
 
 	// Start health check loop.
 	m.wg.Add(1)
@@ -369,18 +374,18 @@ func (m *Manager) createWarm(ctx context.Context, image, profile string, memory 
 		return nil, fmt.Errorf("connect to agent at %s: %w", agentAddr, err)
 	}
 
+	// Authenticate with the agent (must be first message when auth token is set).
+	if err := agent.Authenticate(authToken, 2*time.Second); err != nil {
+		agent.Close()
+		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return nil, fmt.Errorf("agent auth: %w", err)
+	}
+
 	// Verify liveness.
 	if err := agent.Ping(2 * time.Second); err != nil {
 		agent.Close()
 		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		return nil, fmt.Errorf("agent ping failed: %w", err)
-	}
-
-	// Authenticate with the agent.
-	if err := agent.Authenticate(authToken, 2*time.Second); err != nil {
-		agent.Close()
-		_ = m.docker.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return nil, fmt.Errorf("agent auth: %w", err)
 	}
 
 	return &WarmContainer{

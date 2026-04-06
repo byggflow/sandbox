@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"github.com/byggflow/sandbox/internal/identity"
 	"github.com/byggflow/sandbox/internal/proxy"
 	"github.com/byggflow/sandbox/protocol"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // registerRoutes sets up all HTTP handlers on the mux.
@@ -32,6 +33,8 @@ func registerRoutes(mux *http.ServeMux, d *Daemon) {
 	mux.HandleFunc("GET /templates", tenant(d.handleListTemplates))
 	mux.HandleFunc("GET /templates/{id}", tenant(d.handleGetTemplate))
 	mux.HandleFunc("DELETE /templates/{id}", tenant(d.handleDeleteTemplate))
+
+	mux.HandleFunc("GET /profiles", tenant(d.handleListProfiles))
 
 	// Admin routes — pool management. Not tenant-scoped; restricted to Unix socket.
 	mux.HandleFunc("GET /pools", d.socketOnly(d.handlePoolStatus))
@@ -607,6 +610,30 @@ func (d *Daemon) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 
 	d.Log.Info("template deleted", "id", tplID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Profile routes
+
+func (d *Daemon) handleListProfiles(w http.ResponseWriter, r *http.Request) {
+	type profileEntry struct {
+		Name   string  `json:"name"`
+		Image  string  `json:"image"`
+		Memory string  `json:"memory"`
+		CPU    float64 `json:"cpu"`
+	}
+	profiles := []profileEntry{}
+	for name, base := range d.Config.Pool.Base {
+		profiles = append(profiles, profileEntry{
+			Name:   name,
+			Image:  base.Image,
+			Memory: base.Memory,
+			CPU:    base.CPU,
+		})
+	}
+	slices.SortFunc(profiles, func(a, b profileEntry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	writeJSON(w, http.StatusOK, profiles)
 }
 
 // Pool routes
