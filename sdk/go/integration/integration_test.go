@@ -470,6 +470,285 @@ func TestCreateMultipleSandboxes(t *testing.T) {
 	}
 }
 
+// ── Port Tunneling Tests ─────────────────────────────────────────
+
+func TestPortProxy(t *testing.T) {
+	ep := endpoint(t)
+
+	info := createSandbox(t, ep)
+	t.Cleanup(func() { destroySandbox(t, ep, info.ID) })
+
+	ws := connectWS(t, ep, info.ID)
+	defer ws.Close(websocket.StatusNormalClosure, "done")
+
+	// Start an HTTP server inside the sandbox on port 8080.
+	spawnResp := sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
+		"command": `sh -c 'echo "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" | nc -l -p 8080 &'`,
+		"timeout": 5,
+	})
+	if spawnResp.Error != nil {
+		t.Fatalf("spawn server failed: %s", spawnResp.Error.Message)
+	}
+
+	// Wait a moment for the server to start.
+	time.Sleep(500 * time.Millisecond)
+
+	// Access via path-based proxy.
+	proxyURL := fmt.Sprintf("%s/sandboxes/%s/ports/8080/", ep, info.ID)
+	resp, err := http.Get(proxyURL)
+	if err != nil {
+		t.Fatalf("GET proxy URL failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "hello" {
+		t.Fatalf("expected body=%q, got %q (status %d)", "hello", string(body), resp.StatusCode)
+	}
+}
+
+func TestExposeAndClosePort(t *testing.T) {
+	ep := endpoint(t)
+
+	info := createSandbox(t, ep)
+	t.Cleanup(func() { destroySandbox(t, ep, info.ID) })
+
+	ws := connectWS(t, ep, info.ID)
+	defer ws.Close(websocket.StatusNormalClosure, "done")
+
+	// Start a persistent HTTP server inside the sandbox on port 9090.
+	spawnResp := sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
+		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 9090; done &'`,
+		"timeout": 5,
+	})
+	if spawnResp.Error != nil {
+		t.Fatalf("spawn server failed: %s", spawnResp.Error.Message)
+	}
+
+	// Expose port 9090.
+	exposeBody := bytes.NewBufferString(`{"timeout": 10}`)
+	exposeResp, err := http.Post(
+		fmt.Sprintf("%s/sandboxes/%s/ports/9090/expose", ep, info.ID),
+		"application/json",
+		exposeBody,
+	)
+	if err != nil {
+		t.Fatalf("POST expose failed: %v", err)
+	}
+	defer exposeResp.Body.Close()
+
+	if exposeResp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(exposeResp.Body)
+		t.Fatalf("expose returned %d: %s", exposeResp.StatusCode, string(data))
+	}
+
+	var tunnel struct {
+		Port     int    `json:"port"`
+		HostPort int    `json:"host_port"`
+		URL      string `json:"url"`
+	}
+	if err := json.NewDecoder(exposeResp.Body).Decode(&tunnel); err != nil {
+		t.Fatalf("decode expose response: %v", err)
+	}
+
+	if tunnel.Port != 9090 {
+		t.Fatalf("expected port=9090, got %d", tunnel.Port)
+	}
+	if tunnel.HostPort == 0 {
+		t.Fatalf("expected non-zero host_port")
+	}
+	if tunnel.URL == "" {
+		t.Fatalf("expected non-empty URL")
+	}
+
+	// Access via the exposed host port.
+	tunnelResp, err := http.Get(tunnel.URL)
+	if err != nil {
+		t.Fatalf("GET tunnel URL failed: %v", err)
+	}
+	defer tunnelResp.Body.Close()
+
+	tunnelBody, _ := io.ReadAll(tunnelResp.Body)
+	if string(tunnelBody) != "ok" {
+		t.Fatalf("expected body=%q via tunnel, got %q", "ok", string(tunnelBody))
+	}
+
+	// List exposed ports.
+	listResp, err := http.Get(fmt.Sprintf("%s/sandboxes/%s/ports", ep, info.ID))
+	if err != nil {
+		t.Fatalf("GET ports failed: %v", err)
+	}
+	defer listResp.Body.Close()
+
+	var ports []struct {
+		Port     int    `json:"port"`
+		HostPort int    `json:"host_port"`
+		URL      string `json:"url"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&ports); err != nil {
+		t.Fatalf("decode ports response: %v", err)
+	}
+	if len(ports) != 1 {
+		t.Fatalf("expected 1 port, got %d", len(ports))
+	}
+	if ports[0].Port != 9090 {
+		t.Fatalf("expected port=9090, got %d", ports[0].Port)
+	}
+
+	// Close the port.
+	closeReq, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/sandboxes/%s/ports/9090/expose", ep, info.ID), nil)
+	closeResp, err := http.DefaultClient.Do(closeReq)
+	if err != nil {
+		t.Fatalf("DELETE expose failed: %v", err)
+	}
+	closeResp.Body.Close()
+
+	if closeResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 on close, got %d", closeResp.StatusCode)
+	}
+
+	// Verify port is no longer listed.
+	listResp2, err := http.Get(fmt.Sprintf("%s/sandboxes/%s/ports", ep, info.ID))
+	if err != nil {
+		t.Fatalf("GET ports failed: %v", err)
+	}
+	defer listResp2.Body.Close()
+
+	var ports2 []struct{}
+	json.NewDecoder(listResp2.Body).Decode(&ports2)
+	if len(ports2) != 0 {
+		t.Fatalf("expected 0 ports after close, got %d", len(ports2))
+	}
+}
+
+func TestExposeDuplicatePort(t *testing.T) {
+	ep := endpoint(t)
+
+	info := createSandbox(t, ep)
+	t.Cleanup(func() { destroySandbox(t, ep, info.ID) })
+
+	ws := connectWS(t, ep, info.ID)
+	defer ws.Close(websocket.StatusNormalClosure, "done")
+
+	// Start a server on port 7777.
+	sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
+		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 7777; done &'`,
+		"timeout": 5,
+	})
+
+	// Expose port 7777.
+	body1 := bytes.NewBufferString(`{"timeout": 10}`)
+	resp1, err := http.Post(fmt.Sprintf("%s/sandboxes/%s/ports/7777/expose", ep, info.ID), "application/json", body1)
+	if err != nil {
+		t.Fatalf("first expose failed: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on first expose, got %d", resp1.StatusCode)
+	}
+
+	// Try to expose same port again — should get 409 Conflict.
+	body2 := bytes.NewBufferString(`{"timeout": 5}`)
+	resp2, err := http.Post(fmt.Sprintf("%s/sandboxes/%s/ports/7777/expose", ep, info.ID), "application/json", body2)
+	if err != nil {
+		t.Fatalf("second expose failed: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 on duplicate expose, got %d", resp2.StatusCode)
+	}
+}
+
+func TestCloseNonexistentPort(t *testing.T) {
+	ep := endpoint(t)
+
+	info := createSandbox(t, ep)
+	t.Cleanup(func() { destroySandbox(t, ep, info.ID) })
+
+	req, _ := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/sandboxes/%s/ports/12345/expose", ep, info.ID), nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestExposeInvalidPort(t *testing.T) {
+	ep := endpoint(t)
+
+	info := createSandbox(t, ep)
+	t.Cleanup(func() { destroySandbox(t, ep, info.ID) })
+
+	// Port 0 — invalid.
+	body := bytes.NewBufferString(`{}`)
+	resp, err := http.Post(fmt.Sprintf("%s/sandboxes/%s/ports/0/expose", ep, info.ID), "application/json", body)
+	if err != nil {
+		t.Fatalf("POST expose failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for port 0, got %d", resp.StatusCode)
+	}
+
+	// Port 99999 — out of range.
+	body2 := bytes.NewBufferString(`{}`)
+	resp2, err := http.Post(fmt.Sprintf("%s/sandboxes/%s/ports/99999/expose", ep, info.ID), "application/json", body2)
+	if err != nil {
+		t.Fatalf("POST expose failed: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for port 99999, got %d", resp2.StatusCode)
+	}
+}
+
+func TestPortsCleanedOnDestroy(t *testing.T) {
+	ep := endpoint(t)
+
+	info := createSandbox(t, ep)
+
+	ws := connectWS(t, ep, info.ID)
+	defer ws.Close(websocket.StatusNormalClosure, "done")
+
+	// Start a server and expose it.
+	sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
+		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 5555; done &'`,
+		"timeout": 5,
+	})
+
+	body := bytes.NewBufferString(`{"timeout": 10}`)
+	expResp, err := http.Post(fmt.Sprintf("%s/sandboxes/%s/ports/5555/expose", ep, info.ID), "application/json", body)
+	if err != nil {
+		t.Fatalf("expose failed: %v", err)
+	}
+	var tunnel struct {
+		URL string `json:"url"`
+	}
+	json.NewDecoder(expResp.Body).Decode(&tunnel)
+	expResp.Body.Close()
+
+	// Verify we can reach it.
+	r, err := http.Get(tunnel.URL)
+	if err != nil {
+		t.Fatalf("GET tunnel URL failed: %v", err)
+	}
+	r.Body.Close()
+
+	// Destroy the sandbox.
+	destroySandbox(t, ep, info.ID)
+	time.Sleep(500 * time.Millisecond)
+
+	// The tunnel URL should no longer be reachable.
+	_, err = http.Get(tunnel.URL)
+	if err == nil {
+		t.Fatalf("expected tunnel URL to be unreachable after destroy")
+	}
+}
+
 func TestDestroyNonexistent(t *testing.T) {
 	ep := endpoint(t)
 
