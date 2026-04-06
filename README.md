@@ -101,21 +101,100 @@ const sbx = await createSandbox({
 });
 ```
 
+Streaming output as it arrives:
+
+```typescript
+const handle = sbx.process.streamExec("python /root/train.py");
+for await (const event of handle.output) {
+  process.stdout.write(event.data);
+}
+const code = await handle.exitCode;
+```
+
+Port tunneling:
+
+```typescript
+// Path-based proxy URL (no allocation, works immediately)
+const url = sbx.net.url(3000);
+
+// Dedicated host port (waits for port readiness)
+const tunnel = await sbx.net.expose(8080);
+console.log(tunnel.url); // "http://host:assigned-port"
+
+const ports = await sbx.net.ports();
+await sbx.net.close(8080);
+```
+
 ### Go
 
 ```go
 import sandbox "github.com/byggflow/sandbox/sdk/go"
 
 // Connects to /var/run/sandboxd/sandboxd.sock by default
-sbx, err := sandbox.Create(ctx, sandbox.Options{})
+sbx, err := sandbox.Create(ctx, &sandbox.Options{})
 if err != nil {
     log.Fatal(err)
 }
-defer sbx.Close(ctx)
+defer sbx.Close()
 
 err = sbx.FS().Write(ctx, "/root/main.py", []byte("print('hello')"))
-result, err := sbx.Process().Exec(ctx, "python /root/main.py")
+result, err := sbx.Process().Exec(ctx, "python /root/main.py", nil)
 fmt.Println(result.Stdout) // "hello\n"
+```
+
+Streaming output:
+
+```go
+stream, err := sbx.Process().StreamExec(ctx, "python /root/train.py", nil)
+for event := range stream.Output {
+    fmt.Print(event.Data)
+}
+code, err := stream.ExitCode()
+```
+
+Port tunneling:
+
+```go
+url := sbx.Net().URL(3000)
+tunnel, err := sbx.Net().Expose(ctx, 8080, nil)
+ports, err := sbx.Net().Ports(ctx)
+err = sbx.Net().Close(ctx, 8080)
+```
+
+### Python
+
+```bash
+pip install byggflow-sandbox
+```
+
+```python
+from sandbox import create_sandbox
+
+sbx = await create_sandbox()
+
+await sbx.fs.write("/root/main.py", "print('hello')")
+result = await sbx.process.exec_("python /root/main.py")
+print(result.stdout)  # "hello\n"
+
+await sbx.close()
+```
+
+Streaming output:
+
+```python
+handle = await sbx.process.stream_exec("python /root/train.py")
+async for event in handle:
+    print(event.data, end="")
+code = await handle.exit_code()
+```
+
+Port tunneling:
+
+```python
+url = sbx.net.url(3000)
+tunnel = await sbx.net.expose(8080)
+ports = await sbx.net.ports()
+await sbx.net.close(8080)
 ```
 
 ### MCP server
@@ -141,42 +220,82 @@ Add to your MCP client config (e.g. `.mcp.json`):
 
 The MCP server auto-starts a `sandboxd` container via Docker if no daemon is already running. Set `SANDBOX_ENDPOINT` and `SANDBOX_AUTH` to connect to a remote instance instead.
 
+Available tools:
+
+| Tool | Description |
+|---|---|
+| `sandbox_create` | Create a sandbox (profile, template, memory, cpu, ttl) |
+| `sandbox_destroy` | Destroy a sandbox |
+| `sandbox_list` | List active sandboxes |
+| `sandbox_exec` | Run a shell command |
+| `sandbox_eval` | Write code to a file and run it |
+| `sandbox_read_file` | Read file contents with optional line range |
+| `sandbox_write_file` | Create, overwrite, or append to a file |
+| `sandbox_edit_file` | Precise edits via `str_replace` or `insert` |
+| `sandbox_list_files` | List files with recursive depth |
+| `sandbox_upload` | Upload from local path or URL into the sandbox |
+| `sandbox_download` | Download a file from the sandbox to the host |
+| `sandbox_port_url` | Get a path-based proxy URL for a port |
+| `sandbox_expose_port` | Expose a port with a dedicated host port |
+| `sandbox_close_port` | Close an exposed port |
+| `sandbox_list_ports` | List exposed ports |
+| `sandbox_list_templates` | List saved templates |
+| `sandbox_create_template` | Snapshot a sandbox into a template |
+| `sandbox_list_profiles` | List available profiles |
+
 ## Architecture
 
 ```
 CLI / SDK / MCP
-    │
-    │  HTTP + WebSocket over Unix socket (or TCP)
-    ▼
+    |
+    |  HTTP + WebSocket over Unix socket (or TCP/TLS)
+    v
 sandboxd (daemon)
-    ├── Warm Pool (pre-started containers, <5ms allocation)
-    │
-    │  Binary-framed protocol over TCP
-    ▼
+    |-- Warm Pool (pre-started containers, <5ms allocation)
+    |-- Port Tunnel Manager (path-based proxy + host port allocation)
+    |-- Identity Scoping (multi-tenant resource isolation)
+    |-- Event Stream (SSE for sandbox lifecycle events)
+    |
+    |  Binary-framed protocol over TCP
+    v
 Guest Agent (inside container)
-    │
-    │  Direct syscalls
-    ▼
+    |
+    |  Direct syscalls
+    v
 Filesystem / Processes / Network
 ```
 
-The daemon manages container lifecycle, warm pools, and WebSocket sessions. The guest agent runs inside each container and handles filesystem operations, process execution, and network requests. Clients never talk directly to containers.
+The daemon manages container lifecycle, warm pools, WebSocket sessions, and port tunneling. The guest agent runs inside each container and handles filesystem operations, process execution, and network requests. Clients never talk directly to containers.
+
+All resources (sandboxes, templates, tunnels) are scoped to the caller's identity in multi-tenant mode.
 
 ## Warm pool
 
 The core differentiator. Instead of creating a container on every request, the daemon maintains a pool of pre-started containers with the agent already connected. Creating a sandbox from the warm pool takes <5ms.
 
-The pool dynamically allocates slots based on creation frequency across images, with configurable minimums for base images and autoscaling based on hit/miss ratio.
+The pool dynamically allocates slots based on creation frequency across images, with configurable minimums for base images and autoscaling based on hit/miss ratio. Health checks run on a configurable interval, and unhealthy containers are replaced automatically.
 
 ## Sandbox capabilities
 
 | Category | Operations |
 |---|---|
 | **fs** | `read`, `write`, `list`, `stat`, `remove`, `rename`, `mkdir`, `upload`, `download` |
-| **process** | `exec`, `spawn`, `pty` |
+| **process** | `exec`, `streamExec`, `spawn`, `pty` |
 | **env** | `get`, `set`, `delete`, `list` |
-| **net** | `fetch` |
+| **net** | `fetch`, `url`, `expose`, `close`, `ports` |
 | **template** | `save` |
+
+File reads, writes, uploads, and downloads support chunked transfer for large files (>1MB).
+
+## Port tunneling
+
+Sandboxes can expose network ports to the outside through two mechanisms:
+
+**Path-based proxy** -- route traffic through the daemon at `/sandboxes/{id}/ports/{port}/`. No allocation needed; works immediately. Best for API calls, health checks, and programmatic access.
+
+**Host port allocation** -- `POST /sandboxes/{id}/ports/{port}/expose` allocates a dedicated host port and waits for the container port to accept connections. Returns a clean origin URL suitable for web apps, CORS, and browser access. The host port range is configurable via `limits.tunnel_port_min` and `limits.tunnel_port_max`.
+
+Port tunneling is available in all SDKs via the `net` category and in the MCP server via the `sandbox_port_url`, `sandbox_expose_port`, `sandbox_close_port`, and `sandbox_list_ports` tools.
 
 ## CLI reference
 
@@ -189,9 +308,11 @@ The pool dynamically allocates slots based on creation frequency across images, 
 | `sbx create --template tpl-a1b2c3` | Create from a saved template |
 | `sbx create --memory 1g --cpu 2` | Create with resource limits |
 | `sbx create --ttl 3600` | Keep alive for 1 hour after disconnect |
+| `sbx create -l env=prod` | Create with labels (repeatable) |
 | `sbx ls` | List active sandboxes |
 | `sbx rm <id>` | Destroy a sandbox |
 | `sbx rm --all` | Destroy all sandboxes |
+| `sbx stats <id>` | Show CPU, memory, network, PID stats |
 
 ### Execution
 
@@ -248,30 +369,57 @@ Environment variables override config file values:
 | `SANDBOX_TCP` | `server.tcp` |
 | `SANDBOX_DATA_DIR` | `server.data_dir` |
 
+Key config sections:
+
+| Section | Fields |
+|---|---|
+| `server` | `socket`, `tcp`, `tls_cert`, `tls_key`, `data_dir`, `node_id` |
+| `multi_tenant` | `enabled`, `public_keys` (Ed25519, supports rotation) |
+| `limits` | `max_sandboxes`, `max_memory`, `max_cpu`, `max_ttl`, `max_templates`, `max_template_size`, `template_expiry_days`, `rate_limit_entries`, `max_tunnels`, `max_connections_per_tunnel`, `tunnel_port_min`, `tunnel_port_max` |
+| `network` | `bridge_name` |
+| `pool` | `total_warm`, `min_per_image`, `min_base`, `max_warm`, `rebalance_window`, `health_interval`, `liveness_timeout` |
+| `pool.base.<name>` | `image`, `memory`, `cpu`, `storage` |
+
+## Docker images
+
+Published images in `images/`:
+
+| Image | Description |
+|---|---|
+| `byggflow/sandboxd` | The daemon |
+| `byggflow/sandbox-base` | Alpine with the guest agent (default pool image) |
+| `byggflow/sandbox-full` | Ubuntu 24.04 with common dev tools |
+| `byggflow/sandbox-node` | Node.js 22 (Alpine) |
+| `byggflow/sandbox-python` | Python 3.13 (Alpine) |
+
+All sandbox images include the guest agent binary. Use `pool.base.<name>.image` in the config to reference them.
+
 ## Security
 
-sandboxd is designed to run untrusted code. Every sandbox is locked down by default — no opt-in required.
+sandboxd is designed to run untrusted code. Every sandbox is locked down by default -- no opt-in required.
 
 ### Container hardening
 
 | Control | Detail |
 |---|---|
 | Read-only rootfs | Writable tmpfs only for `/tmp` and `/root` |
-| All capabilities dropped | `--cap-drop ALL` — no privileged operations |
+| All capabilities dropped | `--cap-drop ALL` -- no privileged operations |
 | No new privileges | `--security-opt no-new-privileges` |
-| PID limit | 256 by default — prevents fork bombs |
-| Tmpfs size caps | `/tmp` 100MB, `/root` 500MB — bounds disk usage per sandbox |
+| PID limit | 256 by default -- prevents fork bombs |
+| Tmpfs size caps | `/tmp` 100MB, `/root` configurable (default 500MB) |
 | Memory and CPU caps | Per-sandbox cgroup limits, hard-capped by daemon config |
 
 ### Network isolation
 
-Each sandbox runs on a dedicated Docker bridge network (`sandboxd-net`) with inter-container communication disabled. Sandboxes can reach the internet but cannot reach each other. The daemon communicates with agents via container IPs on the bridge — no ports are exposed on the host.
+Each sandbox runs on a dedicated Docker bridge network (`sandboxd-net`) with inter-container communication disabled. Sandboxes can reach the internet but cannot reach each other. The daemon communicates with agents via container IPs on the bridge -- no ports are exposed on the host.
 
 ### Access control
 
 sandboxd follows the same model as Docker: if you can reach the socket, you have access. The Unix socket is permission-controlled via file ownership (`root:sandboxd`).
 
-For multi-tenant deployments, a reverse proxy handles authentication (OAuth, API keys, JWTs) and injects an `X-Sandbox-Identity` header. sandboxd scopes all resources — sandboxes, templates, connections — to the caller's identity. Authentication and authorization are independent layers.
+For multi-tenant deployments, sandboxd supports Ed25519 signature verification. A reverse proxy handles authentication (OAuth, API keys, JWTs), signs requests with Ed25519, and injects an `X-Sandbox-Identity` header. sandboxd verifies the signature and scopes all resources -- sandboxes, templates, tunnels -- to the caller's identity. Multiple public keys are supported for zero-downtime key rotation.
+
+Admin routes (pool management) are restricted to Unix socket connections only and are not accessible over TCP.
 
 ### End-to-end encryption
 
@@ -281,8 +429,33 @@ For deployments where the operator should not see data in transit, the SDK suppo
 const sbx = await createSandbox({ encrypted: true });
 ```
 
-The SDK and guest agent perform a key exchange (X25519) on connect. All payloads are encrypted (AES-256-GCM) before leaving the client. The daemon forwards opaque blobs — it can route requests by method name but cannot read file contents, command arguments, or environment values.
+The SDK and guest agent perform a key exchange (X25519) on connect. All payloads are encrypted (AES-256-GCM) before leaving the client. The daemon forwards opaque blobs -- it can route requests by method name but cannot read file contents, command arguments, or environment values.
 
+## API endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/sandboxes` | Create a sandbox |
+| `GET` | `/sandboxes` | List sandboxes |
+| `DELETE` | `/sandboxes/{id}` | Destroy a sandbox |
+| `GET` | `/sandboxes/{id}/stats` | Resource usage stats |
+| `GET` | `/sandboxes/{id}/ws` | WebSocket session |
+| `POST` | `/templates` | Create a template |
+| `GET` | `/templates` | List templates |
+| `GET` | `/templates/{id}` | Get template details |
+| `DELETE` | `/templates/{id}` | Delete a template |
+| `GET` | `/profiles` | List pool profiles |
+| `POST` | `/sandboxes/{id}/ports/{port}/expose` | Expose a port |
+| `DELETE` | `/sandboxes/{id}/ports/{port}/expose` | Close an exposed port |
+| `GET` | `/sandboxes/{id}/ports` | List exposed ports |
+| `*` | `/sandboxes/{id}/ports/{port}/` | Reverse proxy to container port |
+| `GET` | `/events` | SSE event stream |
+| `GET` | `/events/history` | Recent event history |
+| `GET` | `/pools` | Pool status (Unix socket only) |
+| `PUT` | `/pools/{profile}` | Resize pool (Unix socket only) |
+| `POST` | `/pools/{profile}/flush` | Flush pool (Unix socket only) |
+| `GET` | `/health` | Health check (no auth) |
+| `GET` | `/metrics` | Prometheus metrics (no auth) |
 
 ## Development
 
