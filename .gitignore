@@ -46,3 +46,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # macOS
 .DS_Store
+
+# Markdown
+*.md
+!README.md
+!CLAUDE.md
