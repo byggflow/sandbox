@@ -52,6 +52,10 @@ type LimitsConfig struct {
 	MaxTemplates            int     `toml:"max_templates"`
 	MaxTemplateSize         string  `toml:"max_template_size"`
 	TemplateExpiryDays      int     `toml:"template_expiry_days"`
+	MaxTunnels              int     `toml:"max_tunnels"`               // Per-sandbox tunnel limit. Default 10.
+	MaxConnectionsPerTunnel int     `toml:"max_connections_per_tunnel"` // Concurrent TCP connections per tunnel. Default 100.
+	TunnelPortMin           int     `toml:"tunnel_port_min"`            // Host port range start. 0 = OS assigns.
+	TunnelPortMax           int     `toml:"tunnel_port_max"`            // Host port range end. 0 = OS assigns.
 }
 
 // NetworkConfig holds Docker network settings.
@@ -121,13 +125,15 @@ func Defaults() Config {
 			DataDir: "/var/lib/sandboxd",
 		},
 		Limits: LimitsConfig{
-			MaxSandboxes:       100,
-			MaxMemory:          "4g",
+			MaxSandboxes:            100,
+			MaxMemory:               "4g",
 			MaxCPU:                  4.0,
 			MaxTTL:                  86400,
 			MaxTemplates:            50,
 			MaxTemplateSize:         "2g",
 			TemplateExpiryDays:      60,
+			MaxTunnels:              10,
+			MaxConnectionsPerTunnel: 100,
 		},
 		Network: NetworkConfig{
 			BridgeName: "sandboxd-net",
@@ -209,6 +215,12 @@ func (c *Config) validate() error {
 	}
 	if c.Pool.MaxWarm < c.Pool.TotalWarm {
 		return fmt.Errorf("pool.max_warm must be >= pool.total_warm")
+	}
+	if c.Limits.TunnelPortMin < 0 || c.Limits.TunnelPortMax < 0 {
+		return fmt.Errorf("tunnel port range values must be non-negative")
+	}
+	if c.Limits.TunnelPortMin > 0 && c.Limits.TunnelPortMax > 0 && c.Limits.TunnelPortMin > c.Limits.TunnelPortMax {
+		return fmt.Errorf("tunnel_port_min must be <= tunnel_port_max")
 	}
 	for name, base := range c.Pool.Base {
 		if base.Storage != "" {

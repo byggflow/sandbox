@@ -28,6 +28,7 @@ type Daemon struct {
 	Server    *Server
 	Metrics   *Metrics
 	Events    *EventBus
+	Tunnels   *TunnelManager
 	verifier  atomic.Pointer[identity.Verifier] // Non-nil when multi-tenant mode is enabled.
 	AuthLimit   *rateLimiter                    // Rate limiter for failed auth attempts.
 	CreateLimit *rateLimiter                    // Rate limiter for sandbox creation per identity.
@@ -55,6 +56,7 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		TemplateBackend: &DockerTemplateBackend{Docker: docker},
 		Metrics:         NewMetrics(),
 		Events:          NewEventBus(0),
+		Tunnels:         NewTunnelManager(cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
 		AuthLimit:       newRateLimiter(10, 1*time.Minute),
 		CreateLimit:     newRateLimiter(20, 1*time.Minute),
 		Log:             log,
@@ -383,6 +385,11 @@ func (d *Daemon) destroySandbox(ctx context.Context, sbx *Sandbox) error {
 		sbx.Agent.Close()
 		sbx.Agent = nil
 	}
+	// Close all port tunnels.
+	for port, t := range sbx.Tunnels {
+		d.Tunnels.Close(t)
+		delete(sbx.Tunnels, port)
+	}
 	sbx.mu.Unlock()
 
 	d.Registry.Remove(sbx.ID)
@@ -417,6 +424,12 @@ func (d *Daemon) HandleDisconnect(sbx *Sandbox) {
 			d.Log.Error("failed to destroy sandbox on disconnect", "id", sbx.ID, "error", err)
 		}
 		return
+	}
+
+	// Close all port tunnels — they don't survive disconnect.
+	for port, t := range sbx.Tunnels {
+		d.Tunnels.Close(t)
+		delete(sbx.Tunnels, port)
 	}
 
 	// Enter disconnected state.

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -52,6 +53,9 @@ type Sandbox struct {
 
 	// Agent connection kept alive during disconnect for buffering.
 	Agent *proxy.AgentConn `json:"-"`
+
+	// Active port tunnels keyed by container port.
+	Tunnels map[int]*Tunnel `json:"-"`
 
 	mu sync.Mutex
 }
@@ -236,6 +240,15 @@ func (r *Registry) All() []*Sandbox {
 		result = append(result, sbx)
 	}
 	return result
+}
+
+// ContainerIP extracts the container IP from AgentAddr (strips the :port suffix).
+func (s *Sandbox) ContainerIP() string {
+	host, _, err := net.SplitHostPort(s.AgentAddr)
+	if err != nil {
+		return s.AgentAddr
+	}
+	return host
 }
 
 // GenerateID creates a new sandbox ID. If nodeID is non-empty, the format is
