@@ -1037,7 +1037,7 @@ func (d *Daemon) proxyWebSocket(w http.ResponseWriter, r *http.Request, containe
 		return
 	}
 
-	target := fmt.Sprintf("%s:%d", containerIP, port)
+	target := net.JoinHostPort(containerIP, fmt.Sprintf("%d", port))
 	upstream, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, fmt.Sprintf("upstream dial failed: %v", err))
