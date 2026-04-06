@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/byggflow/sandbox/protocol"
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // Session bridges a client WebSocket connection to a guest agent TCP connection.

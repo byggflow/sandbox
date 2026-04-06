@@ -10,7 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // jsonRPCRequest is a JSON-RPC 2.0 request.
@@ -81,7 +81,6 @@ func dialWS(ctx context.Context, url string, headers map[string]string) (*wsTran
 				},
 			},
 		}
-		// nhooyr.io/websocket v1 uses websocket.Dial with options.
 		conn, _, err = websocket.Dial(ctx, "ws://localhost"+wsPath, &websocket.DialOptions{
 			HTTPHeader: httpHeaders,
 			HTTPClient: httpClient,

@@ -149,6 +149,12 @@ func (rc *responseCapture) Write(b []byte) (int, error) {
 	return rc.ResponseWriter.Write(b)
 }
 
+// Unwrap returns the underlying ResponseWriter, allowing libraries like
+// coder/websocket to discover http.Hijacker and http.Flusher via http.ResponseController.
+func (rc *responseCapture) Unwrap() http.ResponseWriter {
+	return rc.ResponseWriter
+}
+
 // metricsMiddleware wraps an http.Handler to record request metrics.
 func metricsMiddleware(m *Metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
