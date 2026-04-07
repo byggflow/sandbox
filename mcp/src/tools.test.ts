@@ -7,6 +7,16 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function createClient(): { client: Client; transport: StdioClientTransport } {
+  const transport = new StdioClientTransport({
+    command: "bun",
+    args: [new URL("./index.ts", import.meta.url).pathname],
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "test-client", version: "1.0.0" });
+  return { client, transport };
+}
+
 async function connectWithRetry(maxAttempts = 3): Promise<{
   client: Client;
   transport: StdioClientTransport;
