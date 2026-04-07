@@ -60,7 +60,7 @@ func (tm *TunnelManager) Expose(ctx context.Context, sbx *Sandbox, containerPort
 		return nil, fmt.Errorf("sandbox has no container IP")
 	}
 
-	target := fmt.Sprintf("%s:%d", containerIP, containerPort)
+	target := net.JoinHostPort(containerIP, fmt.Sprintf("%d", containerPort))
 
 	// Probe for port readiness with exponential backoff.
 	if err := tm.waitForPort(ctx, target, timeout); err != nil {

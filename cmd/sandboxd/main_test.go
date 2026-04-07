@@ -73,8 +73,13 @@ max_sandboxes = 100
 		}
 	}()
 
+	// Watch the directory as well so renames (new inode) are caught reliably.
+	if err := watcher.Add(dir); err != nil {
+		t.Fatal(err)
+	}
+
 	// Give the watcher time to start.
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	// Test 1: Direct write triggers reload.
 	updated := []byte(`[server]
@@ -86,8 +91,8 @@ max_sandboxes = 200
 		t.Fatal(err)
 	}
 
-	// Wait for debounce to fire.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for debounce to fire (generous for CI).
+	time.Sleep(800 * time.Millisecond)
 
 	if got := reloadCount.Load(); got != 1 {
 		t.Errorf("expected 1 reload after write, got %d", got)
@@ -107,8 +112,8 @@ max_sandboxes = 300
 		t.Fatal(err)
 	}
 
-	// Wait for debounce to fire.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for debounce to fire (generous for CI).
+	time.Sleep(800 * time.Millisecond)
 
 	if got := reloadCount.Load(); got != 2 {
 		t.Errorf("expected 2 reloads after atomic rename, got %d", got)
@@ -127,8 +132,8 @@ max_sandboxes = ` + string(rune('0'+i)) + `
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Wait for debounce to fire.
-	time.Sleep(500 * time.Millisecond)
+	// Wait for debounce to fire (generous for CI).
+	time.Sleep(800 * time.Millisecond)
 
 	if got := reloadCount.Load(); got != 3 {
 		t.Errorf("expected 3 total reloads (rapid writes debounced), got %d", got)

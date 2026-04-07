@@ -34,6 +34,7 @@ describe("MCP server protocol", () => {
     const result = await client.listTools();
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
+      "sandbox_close_port",
       "sandbox_create",
       "sandbox_create_template",
       "sandbox_destroy",
@@ -41,10 +42,13 @@ describe("MCP server protocol", () => {
       "sandbox_edit_file",
       "sandbox_eval",
       "sandbox_exec",
+      "sandbox_expose_port",
       "sandbox_list",
       "sandbox_list_files",
+      "sandbox_list_ports",
       "sandbox_list_profiles",
       "sandbox_list_templates",
+      "sandbox_port_url",
       "sandbox_read_file",
       "sandbox_upload",
       "sandbox_write_file",
