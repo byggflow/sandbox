@@ -31,8 +31,22 @@ describe("MCP server protocol", () => {
   });
 
   test("lists all tools", async () => {
-    const result = await client.listTools();
-    const names = result.tools.map((t) => t.name).sort();
+    // Retry with a fresh connection if the server wasn't ready.
+    let result;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        result = await client.listTools();
+        break;
+      } catch {
+        if (attempt === 2) throw new Error("server not ready after 3 attempts");
+        await transport.close();
+        const c = createClient();
+        client = c.client;
+        transport = c.transport;
+        await client.connect(transport);
+      }
+    }
+    const names = result!.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "sandbox_close_port",
       "sandbox_create",
