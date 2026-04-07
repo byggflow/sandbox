@@ -91,7 +91,7 @@ type BaseImageConfig struct {
 	Memory  string  `toml:"memory"`
 	CPU     float64 `toml:"cpu"`
 	Storage string  `toml:"storage"` // tmpfs size for /root (e.g. "500m", "1g"). Defaults to "500m".
-	Runtime string  `toml:"runtime"` // "docker" (default) or "firecracker".
+	Runtime string  `toml:"runtime"` // "docker" (default), "docker+gvisor", or "firecracker".
 }
 
 // RuntimeOrDefault returns the runtime name, defaulting to "docker".
@@ -250,8 +250,8 @@ func (c *Config) validate() error {
 			}
 		}
 		rt := base.RuntimeOrDefault()
-		if rt != "docker" && rt != "firecracker" {
-			return fmt.Errorf("pool.base.%s.runtime: must be \"docker\" or \"firecracker\", got %q", name, rt)
+		if rt != "docker" && rt != "docker+gvisor" && rt != "firecracker" {
+			return fmt.Errorf("pool.base.%s.runtime: must be \"docker\", \"docker+gvisor\", or \"firecracker\", got %q", name, rt)
 		}
 		if rt == "firecracker" {
 			hasFirecracker = true

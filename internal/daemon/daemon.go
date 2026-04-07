@@ -17,7 +17,7 @@ import (
 // Daemon is the main sandboxd service.
 type Daemon struct {
 	Config    config.Config
-	Runtimes  map[string]runtime.Runtime // keyed by runtime name ("docker", "firecracker")
+	Runtimes  map[string]runtime.Runtime // keyed by runtime name ("docker", "docker+gvisor", "firecracker")
 	Pool      *pool.Manager
 	Registry  *Registry
 	Templates        *TemplateRegistry
@@ -40,12 +40,24 @@ type Daemon struct {
 func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 	runtimes := make(map[string]runtime.Runtime)
 
-	// Always create the Docker runtime.
-	dockerRT, err := runtime.NewDockerRuntime(cfg.Network.BridgeName, log)
+	// Always create the Docker runtime (runc).
+	dockerRT, err := runtime.NewDockerRuntime("docker", cfg.Network.BridgeName, "", log)
 	if err != nil {
 		return nil, fmt.Errorf("create docker runtime: %w", err)
 	}
 	runtimes["docker"] = dockerRT
+
+	// Create the Docker+gVisor runtime if any profile uses it.
+	for _, base := range cfg.Pool.Base {
+		if base.RuntimeOrDefault() == "docker+gvisor" {
+			gvRT, err := runtime.NewDockerRuntime("docker+gvisor", cfg.Network.BridgeName, "runsc", log)
+			if err != nil {
+				return nil, fmt.Errorf("create docker+gvisor runtime: %w", err)
+			}
+			runtimes["docker+gvisor"] = gvRT
+			break
+		}
+	}
 
 	// Create the Firecracker runtime if any profile uses it.
 	for _, base := range cfg.Pool.Base {
@@ -60,6 +72,9 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 
 	templateBackends := map[string]TemplateBackend{
 		"docker": &DockerTemplateBackend{Docker: dockerRT.Client},
+	}
+	if gvRT, ok := runtimes["docker+gvisor"]; ok {
+		templateBackends["docker+gvisor"] = &DockerTemplateBackend{Docker: gvRT.(*runtime.DockerRuntime).Client}
 	}
 	if fcRT, ok := runtimes["firecracker"].(*runtime.FirecrackerRuntime); ok {
 		templateBackends["firecracker"] = runtime.NewFirecrackerTemplateBackend(fcRT, cfg.Server.DataDir)

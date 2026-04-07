@@ -6,7 +6,7 @@
 
 High-frequency sandboxing as a service.
 
-sandboxd is a daemon that exposes a Unix socket and makes spinning up isolated environments as cheap and fast as possible. It supports two runtime backends (Docker containers and Firecracker microVMs) with per-profile runtime selection. A warm pool of pre-created sandboxes means allocation takes single-digit milliseconds instead of seconds.
+sandboxd is a daemon that exposes a Unix socket and makes spinning up isolated environments as cheap and fast as possible. It supports three isolation levels -- Docker with runc, Docker with gVisor, and Firecracker microVMs -- selectable per profile. A warm pool of pre-created sandboxes means allocation takes single-digit milliseconds instead of seconds.
 
 Built and maintained by [Byggflow](https://byggflow.com).
 
@@ -70,6 +70,7 @@ This produces three binaries in `bin/`: `sandboxd` (daemon), `sbx` (CLI), and `s
 ### Prerequisites
 
 - Linux host with Docker installed
+- (Optional) [gVisor](https://gvisor.dev/docs/user_guide/install/) for `docker+gvisor` isolation
 - (Optional) Firecracker + KVM for microVM sandboxes
 
 ### Run the daemon
@@ -289,7 +290,7 @@ CLI / SDK / MCP
     |  HTTP + WebSocket over Unix socket (or TCP/TLS)
     v
 sandboxd (daemon)
-    |-- Runtime Interface (Docker containers or Firecracker microVMs)
+    |-- Runtime Interface (Docker+runc, Docker+gVisor, or Firecracker)
     |-- Warm Pool (pre-started sandboxes, <5ms allocation)
     |-- Port Tunnel Manager (path-based proxy + host port allocation)
     |-- Identity Scoping (multi-tenant resource isolation)
@@ -308,12 +309,15 @@ The daemon manages sandbox lifecycle, warm pools, WebSocket sessions, and port t
 
 ### Runtimes
 
-| Runtime | Isolation | Transport | Use case |
-|---|---|---|---|
-| **Docker** (default) | Container (cgroups + namespaces) | TCP over bridge network | General purpose, fast startup |
-| **Firecracker** | microVM (KVM hardware virtualization) | vsock (AF_VSOCK) | Untrusted code, stronger isolation |
+sandboxd supports three isolation levels, selectable per profile. Each level trades startup speed and overhead for stronger isolation:
 
-Runtimes are selected per profile in the config. The SDK and API are identical regardless of backend, so callers don't need to know which runtime is in use.
+| Runtime | Config value | Isolation | Transport | Protects against |
+|---|---|---|---|---|
+| **Docker + runc** (default) | `docker` | Namespaces, seccomp, dropped caps | TCP over bridge | Process-level escape |
+| **Docker + gVisor** | `docker+gvisor` | Userspace kernel, syscall filtering | TCP over bridge | Host kernel exploitation |
+| **Firecracker** | `firecracker` | Separate kernel, KVM hardware | vsock (AF_VSOCK) | Kernel-level attacks |
+
+Runtimes are selected per profile in the config. The SDK and API are identical regardless of backend, so callers don't need to know which runtime is in use. gVisor requires [runsc](https://gvisor.dev/docs/user_guide/install/) installed and registered with the Docker daemon.
 
 All resources (sandboxes, templates, tunnels) are scoped to the caller's identity in multi-tenant mode.
 
@@ -426,7 +430,7 @@ Key config sections:
 | `limits` | `max_sandboxes`, `max_memory`, `max_cpu`, `max_ttl`, `max_templates`, `max_template_size`, `template_expiry_days`, `rate_limit_entries`, `max_tunnels`, `max_connections_per_tunnel`, `tunnel_port_min`, `tunnel_port_max` |
 | `network` | `bridge_name` |
 | `pool` | `total_warm`, `min_per_image`, `min_base`, `max_warm`, `rebalance_window`, `health_interval`, `liveness_timeout` |
-| `pool.base.<name>` | `image`, `memory`, `cpu`, `storage`, `runtime` (`docker` or `firecracker`) |
+| `pool.base.<name>` | `image`, `memory`, `cpu`, `storage`, `runtime` (`docker`, `docker+gvisor`, or `firecracker`) |
 | `firecracker` | `binary_path`, `kernel_path`, `rootfs_dir`, `vsock_cid_base` |
 
 ## Docker images
@@ -447,7 +451,7 @@ All sandbox images include the guest agent binary. Use `pool.base.<name>.image` 
 
 sandboxd is designed to run untrusted code. Every sandbox is locked down by default -- no opt-in required.
 
-### Container hardening (Docker runtime)
+### Container hardening (Docker + runc)
 
 | Control | Detail |
 |---|---|
@@ -458,7 +462,19 @@ sandboxd is designed to run untrusted code. Every sandbox is locked down by defa
 | Tmpfs size caps | `/tmp` 100MB, `/root` configurable (default 500MB) |
 | Memory and CPU caps | Per-sandbox cgroup limits, hard-capped by daemon config |
 
-### microVM isolation (Firecracker runtime)
+### gVisor isolation (Docker + gVisor)
+
+All container hardening controls above apply, plus:
+
+| Control | Detail |
+|---|---|
+| Userspace kernel | Syscalls are handled by gVisor's Sentry, not the host kernel |
+| Syscall filtering | Only ~380 syscalls implemented; unknown syscalls are rejected |
+| Defense in depth | Even if application code has a kernel exploit, it targets the Sentry, not the host |
+
+Set `runtime = "docker+gvisor"` on a profile. Requires [runsc](https://gvisor.dev/docs/user_guide/install/) registered with the Docker daemon.
+
+### microVM isolation (Firecracker)
 
 | Control | Detail |
 |---|---|
@@ -470,7 +486,7 @@ sandboxd is designed to run untrusted code. Every sandbox is locked down by defa
 
 ### Network isolation
 
-**Docker**: Each sandbox runs on a dedicated Docker bridge network (`sandboxd-net`) with inter-container communication disabled. Sandboxes can reach the internet but cannot reach each other. The daemon communicates with agents via container IPs on the bridge -- no ports are exposed on the host.
+**Docker (runc and gVisor)**: Each sandbox runs on a dedicated Docker bridge network (`sandboxd-net`) with inter-container communication disabled. Sandboxes can reach the internet but cannot reach each other. The daemon communicates with agents via container IPs on the bridge -- no ports are exposed on the host.
 
 **Firecracker**: Each microVM is fully isolated at the hardware level. The daemon communicates with the guest agent via vsock (AF_VSOCK) with no TCP networking between host and guest.
 

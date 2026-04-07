@@ -21,26 +21,52 @@ type DockerRuntime struct {
 	Client      *client.Client
 	NetworkID   string
 	NetworkName string
+	OCIRuntime  string // OCI runtime name passed to Docker (e.g. "runsc"). Empty = daemon default (runc).
+	name        string // Canonical name matching config keys (e.g. "docker", "docker+gvisor").
 	Log         *slog.Logger
 }
 
 // NewDockerRuntime creates a DockerRuntime with a new Docker client.
-func NewDockerRuntime(networkName string, log *slog.Logger) (*DockerRuntime, error) {
+// name is the canonical runtime name used in config and map keys (e.g. "docker", "docker+gvisor").
+// ociRuntime specifies the OCI runtime binary for containers (e.g. "runsc" for gVisor).
+// Pass "" for both to use the Docker daemon's default runtime (runc).
+func NewDockerRuntime(name string, networkName string, ociRuntime string, log *slog.Logger) (*DockerRuntime, error) {
 	docker, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("create docker client: %w", err)
 	}
+	if name == "" {
+		name = "docker"
+	}
 	return &DockerRuntime{
 		Client:      docker,
 		NetworkName: networkName,
+		OCIRuntime:  ociRuntime,
+		name:        name,
 		Log:         log,
 	}, nil
 }
 
-func (r *DockerRuntime) Name() string { return "docker" }
+func (r *DockerRuntime) Name() string { return r.name }
 
-// Init ensures the Docker bridge network exists.
+// Init ensures the Docker bridge network exists and validates the OCI runtime.
 func (r *DockerRuntime) Init(ctx context.Context) error {
+	// Validate OCI runtime is registered with the Docker daemon.
+	if r.OCIRuntime != "" {
+		info, err := r.Client.Info(ctx)
+		if err != nil {
+			return fmt.Errorf("docker info: %w", err)
+		}
+		if _, ok := info.Runtimes[r.OCIRuntime]; !ok {
+			available := make([]string, 0, len(info.Runtimes))
+			for name := range info.Runtimes {
+				available = append(available, name)
+			}
+			return fmt.Errorf("OCI runtime %q not registered with Docker daemon (available: %v)", r.OCIRuntime, available)
+		}
+		r.Log.Info("validated OCI runtime", "runtime", r.OCIRuntime)
+	}
+
 	nets, err := r.Client.NetworkList(ctx, network.ListOptions{
 		Filters: filters.NewArgs(filters.Arg("name", r.NetworkName)),
 	})
@@ -98,6 +124,7 @@ func (r *DockerRuntime) Create(ctx context.Context, opts CreateOpts) (*Instance,
 			Labels: labels,
 		},
 		&container.HostConfig{
+			Runtime:        r.OCIRuntime,
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges"},
 			ReadonlyRootfs: true,

@@ -162,6 +162,90 @@ func TestParseByteSize(t *testing.T) {
 	}
 }
 
+func TestRuntimeValidation(t *testing.T) {
+	base := `
+[server]
+socket = "/tmp/test.sock"
+
+[pool]
+total_warm = 0
+max_warm = 0
+
+`
+	tests := []struct {
+		name    string
+		extra   string
+		wantErr bool
+	}{
+		{
+			name:    "default runtime (empty)",
+			extra:   "[pool.base.default]\nimage = \"test:latest\"\nmemory = \"512m\"\ncpu = 1.0\n",
+			wantErr: false,
+		},
+		{
+			name:    "explicit docker",
+			extra:   "[pool.base.default]\nimage = \"test:latest\"\nmemory = \"512m\"\ncpu = 1.0\nruntime = \"docker\"\n",
+			wantErr: false,
+		},
+		{
+			name:    "docker+gvisor",
+			extra:   "[pool.base.secure]\nimage = \"test:latest\"\nmemory = \"512m\"\ncpu = 1.0\nruntime = \"docker+gvisor\"\n",
+			wantErr: false,
+		},
+		{
+			name:  "firecracker with required config",
+			extra: "[pool.base.fc]\nimage = \"fc.rootfs\"\nmemory = \"256m\"\ncpu = 1.0\nruntime = \"firecracker\"\n\n[firecracker]\nbinary_path = \"/usr/local/bin/firecracker\"\nkernel_path = \"/var/lib/firecracker/vmlinux\"\n",
+			wantErr: false,
+		},
+		{
+			name:    "firecracker missing binary_path",
+			extra:   "[pool.base.fc]\nimage = \"fc.rootfs\"\nmemory = \"256m\"\ncpu = 1.0\nruntime = \"firecracker\"\n",
+			wantErr: true,
+		},
+		{
+			name:    "invalid runtime",
+			extra:   "[pool.base.default]\nimage = \"test:latest\"\nmemory = \"512m\"\ncpu = 1.0\nruntime = \"docker+kata\"\n",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			if err := os.WriteFile(path, []byte(base+tt.extra), 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if tt.wantErr && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeOrDefault(t *testing.T) {
+	tests := []struct {
+		runtime string
+		want    string
+	}{
+		{"", "docker"},
+		{"docker", "docker"},
+		{"docker+gvisor", "docker+gvisor"},
+		{"firecracker", "firecracker"},
+	}
+	for _, tt := range tests {
+		b := BaseImageConfig{Runtime: tt.runtime}
+		got := b.RuntimeOrDefault()
+		if got != tt.want {
+			t.Errorf("RuntimeOrDefault(%q) = %q, want %q", tt.runtime, got, tt.want)
+		}
+	}
+}
+
 func TestParseByteSizeErrors(t *testing.T) {
 	for _, input := range []string{"", "abc", "x"} {
 		_, err := ParseByteSize(input)
