@@ -31,18 +31,7 @@ describe("MCP server protocol", () => {
   });
 
   test("lists all tools", async () => {
-    // Retry listTools once if the subprocess isn't ready yet (CI timing).
-    let result;
-    try {
-      result = await client.listTools();
-    } catch {
-      await transport.close();
-      const c = createClient();
-      client = c.client;
-      transport = c.transport;
-      await client.connect(transport);
-      result = await client.listTools();
-    }
+    const result = await client.listTools();
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "sandbox_close_port",

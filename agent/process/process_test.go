@@ -200,8 +200,8 @@ func TestSpawnAndExit(t *testing.T) {
 		t.Errorf("pid = %d, want > 0", pid)
 	}
 
-	// Wait for process to finish
-	time.Sleep(500 * time.Millisecond)
+	// Wait for process to finish (generous for CI with -race).
+	time.Sleep(2 * time.Second)
 
 	// Read notifications from conn
 	data := conn.Bytes()
