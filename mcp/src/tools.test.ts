@@ -5,14 +5,31 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 // ── Integration tests: spawn the real MCP server process ─────────
 
-function createClient(): { client: Client; transport: StdioClientTransport } {
-  const transport = new StdioClientTransport({
-    command: "bun",
-    args: [new URL("./index.ts", import.meta.url).pathname],
-    stderr: "pipe",
-  });
-  const client = new Client({ name: "test-client", version: "1.0.0" });
-  return { client, transport };
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function connectWithRetry(maxAttempts = 3): Promise<{
+  client: Client;
+  transport: StdioClientTransport;
+}> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const transport = new StdioClientTransport({
+      command: "bun",
+      args: [new URL("./index.ts", import.meta.url).pathname],
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    try {
+      await client.connect(transport);
+      // Verify the connection is alive by making a ping-like call.
+      await client.listTools();
+      return { client, transport };
+    } catch {
+      try { await transport.close(); } catch {}
+      if (attempt === maxAttempts - 1) throw new Error("MCP server not ready after " + maxAttempts + " attempts");
+      await sleep(500);
+    }
+  }
+  throw new Error("unreachable");
 }
 
 describe("MCP server protocol", () => {
@@ -20,10 +37,9 @@ describe("MCP server protocol", () => {
   let transport: StdioClientTransport;
 
   beforeEach(async () => {
-    const c = createClient();
+    const c = await connectWithRetry();
     client = c.client;
     transport = c.transport;
-    await client.connect(transport);
 
     return async () => {
       await transport.close();
@@ -31,22 +47,8 @@ describe("MCP server protocol", () => {
   });
 
   test("lists all tools", async () => {
-    // Retry with a fresh connection if the server wasn't ready.
-    let result;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        result = await client.listTools();
-        break;
-      } catch {
-        if (attempt === 2) throw new Error("server not ready after 3 attempts");
-        await transport.close();
-        const c = createClient();
-        client = c.client;
-        transport = c.transport;
-        await client.connect(transport);
-      }
-    }
-    const names = result!.tools.map((t) => t.name).sort();
+    const result = await client.listTools();
+    const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "sandbox_close_port",
       "sandbox_create",
