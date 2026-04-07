@@ -29,22 +29,22 @@ Please do not co-author commits with AI assistants, as this can create confusion
 
 See `conventions/` for the full conventions with examples in both TypeScript and Go:
 
-- **`conventions/QUALITY.md`** — API design: verb+noun entry points, category objects, single call backbone, no global state, fail-early errors.
-- **`conventions/PERFORMANCE.md`** — Performance: data structure selection, bounded collections, early exits, signal over polling, hot-path allocations, batching, coordination.
+- **`conventions/QUALITY.md`** -API design: verb+noun entry points, category objects, single call backbone, no global state, fail-early errors.
+- **`conventions/PERFORMANCE.md`** -Performance: data structure selection, bounded collections, early exits, signal over polling, hot-path allocations, batching, coordination.
 
 ## Repository structure
 
 This is a monorepo with Go and TypeScript code:
 
-- `cmd/` — Go binary entrypoints (`sandboxd`, `sbx`, `sandbox-agent`)
-- `internal/` — daemon-only Go packages (not importable externally)
-- `agent/` — guest agent Go packages
-- `protocol/` — shared wire protocol types (used by both daemon and agent)
-- `sdk/go/` — public Go client SDK
-- `sdk/typescript/` — TypeScript client SDK (`@byggflow/sandbox`)
-- `images/` — Dockerfiles for published images
-- `deploy/` — docker-compose, systemd units
-- `config/` — example configuration files
+- `cmd/` -Go binary entrypoints (`sandboxd`, `sbx`, `sandbox-agent`)
+- `internal/` -daemon-only Go packages (not importable externally)
+- `agent/` -guest agent Go packages
+- `protocol/` -shared wire protocol types (used by both daemon and agent)
+- `sdk/go/` -public Go client SDK
+- `sdk/typescript/` -TypeScript client SDK (`@byggflow/sandbox`)
+- `images/` -Dockerfiles for published images
+- `deploy/` -docker-compose, systemd units
+- `config/` -example configuration files
 
 ## Go
 
@@ -53,7 +53,7 @@ Go is the primary language for the daemon, agent, CLI, and Go SDK.
 - Use standard library where possible. Minimize dependencies.
 - Use `context.Context` as the first parameter for any function that does I/O.
 - Use `internal/` for packages that should not be imported outside this module.
-- Errors are values — return `error`, don't panic. Wrap errors with `fmt.Errorf("doing x: %w", err)`.
+- Errors are values -return `error`, don't panic. Wrap errors with `fmt.Errorf("doing x: %w", err)`.
 - Use `go test ./...` to run all Go tests. Use the standard `testing` package.
 - Build binaries with `make build` or `go build ./cmd/<name>`.
 

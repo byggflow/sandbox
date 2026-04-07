@@ -6,6 +6,7 @@ This guide covers deploying sandboxd in production.
 
 - Linux host (x86_64 or arm64)
 - Docker Engine 24+
+- (Optional) [gVisor runsc](https://gvisor.dev/docs/user_guide/install/) for `docker+gvisor` isolation
 - (Optional) Firecracker + KVM-capable host for microVM sandboxes
 
 ## Installation

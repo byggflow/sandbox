@@ -63,3 +63,15 @@ image = "byggflow/sandbox-python:latest"
 memory = "1g"
 cpu = 2.0
 storage = "1g"
+
+# Isolation levels:
+#   "docker"        - namespaces, seccomp, dropped caps (default)
+#   "docker+gvisor" - userspace kernel via gVisor runsc (requires runsc installed)
+#   "firecracker"   - separate kernel in KVM microVM
+#
+# [pool.base.secure]
+# image = "byggflow/sandbox-base:latest"
+# memory = "512m"
+# cpu = 1.0
+# storage = "500m"
+# runtime = "docker+gvisor"

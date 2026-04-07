@@ -26,8 +26,9 @@ We will acknowledge your report within 48 hours and aim to provide a fix within 
 
 sandboxd is designed to run untrusted code. See the [Security section](README.md#security) in the README for details on:
 
-- Container hardening (Docker runtime)
-- microVM isolation (Firecracker runtime)
+- Container hardening (Docker + runc)
+- gVisor isolation (Docker + gVisor)
+- microVM isolation (Firecracker)
 - Network isolation
 - Access control and multi-tenant identity scoping
 - End-to-end encryption
