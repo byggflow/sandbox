@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import { accessSync, constants, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   createSandbox,
   connectSandbox,
@@ -54,9 +57,109 @@ function spawn(
 
 // ── Docker helpers ───────────────────────────────────────────────
 
+const isWindows = process.platform === "win32";
+const pathSep = isWindows ? ";" : ":";
+const dockerExe = isWindows ? "docker.exe" : "docker";
+
+/** Extra directories to search for the docker binary when PATH is minimal (e.g. MCP hosts). */
+const DOCKER_SEARCH_DIRS: string[] = isWindows
+  ? [
+      join(process.env.ProgramFiles ?? "C:\\Program Files", "Docker", "Docker", "resources", "bin"),
+      join(process.env.ProgramW6432 ?? "C:\\Program Files", "Docker", "Docker", "resources", "bin"),
+      join(process.env.LOCALAPPDATA ?? "", "Docker", "resources", "bin"),
+    ].filter(Boolean)
+  : [
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      "/usr/bin",
+      join(homedir(), ".docker/bin"),
+      join(homedir(), "bin"),
+    ];
+
+/** Resolve the absolute path to the docker CLI binary. */
+function resolveDockerBin(): string {
+  // Honour an explicit override.
+  if (process.env.DOCKER_PATH) return process.env.DOCKER_PATH;
+
+  // Check whether docker is already reachable on PATH.
+  const pathDirs = (process.env.PATH ?? "").split(pathSep);
+  for (const dir of pathDirs) {
+    const candidate = join(dir, dockerExe);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // not here
+    }
+  }
+
+  // Fall back to well-known installation directories.
+  for (const dir of DOCKER_SEARCH_DIRS) {
+    const candidate = join(dir, dockerExe);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // not here
+    }
+  }
+
+  // Last resort: return bare name and let execFile fail with a clear error.
+  return dockerExe;
+}
+
+/** Well-known Docker socket paths (Unix only), checked in order. */
+const DOCKER_SOCKET_PATHS = [
+  "/var/run/docker.sock",
+  join(homedir(), ".colima/default/docker.sock"),
+  join(homedir(), ".docker/run/docker.sock"),
+  join(homedir(), "Library/Containers/com.docker.docker/Data/docker.raw.sock"),
+];
+
+/** Windows named pipe used by Docker Desktop. */
+const WINDOWS_PIPE = "//./pipe/docker_engine";
+
+/** Resolve the host-side Docker socket path for volume mounts. */
+function resolveDockerSocket(): string {
+  // Honour DOCKER_HOST if set.
+  const dockerHost = process.env.DOCKER_HOST;
+  if (dockerHost?.startsWith("unix://")) {
+    const sockPath = dockerHost.slice("unix://".length);
+    try {
+      return realpathSync(sockPath);
+    } catch {
+      return sockPath;
+    }
+  }
+  if (dockerHost?.startsWith("npipe://")) {
+    return dockerHost.slice("npipe://".length).replace(/\//g, "\\");
+  }
+
+  if (isWindows) return WINDOWS_PIPE;
+
+  // Probe well-known Unix socket paths.
+  for (const candidate of DOCKER_SOCKET_PATHS) {
+    try {
+      const real = realpathSync(candidate);
+      accessSync(real, constants.R_OK);
+      return real;
+    } catch {
+      // not here
+    }
+  }
+
+  return "/var/run/docker.sock";
+}
+
+let dockerBin: string | undefined;
+function docker(): string {
+  dockerBin ??= resolveDockerBin();
+  return dockerBin;
+}
+
 async function dockerAvailable(): Promise<boolean> {
   try {
-    const { code } = await spawn("docker", ["info"], { stdout: "ignore", stderr: "ignore" });
+    const { code } = await spawn(docker(), ["info"], { stdout: "ignore", stderr: "ignore" });
     return code === 0;
   } catch {
     return false;
@@ -66,7 +169,7 @@ async function dockerAvailable(): Promise<boolean> {
 async function isContainerRunning(): Promise<boolean> {
   try {
     const { code, stdout } = await spawn(
-      "docker",
+      docker(),
       ["inspect", "-f", "{{.State.Running}}", DOCKER_CONTAINER],
       { stderr: "ignore" },
     );
@@ -84,25 +187,28 @@ async function isContainerRunning(): Promise<boolean> {
 // via localhost:7522 which is forwarded through the VM boundary.
 
 async function startDockerDaemon(): Promise<void> {
+  const bin = docker();
+  const socket = resolveDockerSocket();
+
   // Check if container exists but stopped
   const { code: existsCode } = await spawn(
-    "docker",
+    bin,
     ["inspect", DOCKER_CONTAINER],
     { stdout: "ignore", stderr: "ignore" },
   );
   const exists = existsCode === 0;
 
   if (exists) {
-    const { code, stderr } = await spawn("docker", ["start", DOCKER_CONTAINER]);
+    const { code, stderr } = await spawn(bin, ["start", DOCKER_CONTAINER]);
     if (code !== 0) {
       throw new Error(`Failed to start ${DOCKER_CONTAINER}: ${stderr}`);
     }
   } else {
-    const { code, stderr } = await spawn("docker", [
+    const { code, stderr } = await spawn(bin, [
       "run", "-d",
       "--name", DOCKER_CONTAINER,
       "--network", "host",
-      "-v", "/var/run/docker.sock:/var/run/docker.sock",
+      "-v", `${socket}:/var/run/docker.sock`,
       "-e", "SANDBOX_TCP=0.0.0.0:7522",
       DOCKER_IMAGE,
     ]);
@@ -199,7 +305,7 @@ export async function ensureDaemon(): Promise<DaemonConnection> {
   // Start daemon in Docker
   if (await isContainerRunning()) {
     console.error(`[sandbox-mcp] Existing ${DOCKER_CONTAINER} container is unhealthy, removing...`);
-    await spawn("docker", ["rm", "-f", DOCKER_CONTAINER], { stdout: "ignore", stderr: "ignore" });
+    await spawn(docker(), ["rm", "-f", DOCKER_CONTAINER], { stdout: "ignore", stderr: "ignore" });
   }
 
   if (!(await dockerAvailable())) {
