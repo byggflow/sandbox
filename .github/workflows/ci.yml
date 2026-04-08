@@ -65,7 +65,7 @@ jobs:
         run: python -m pytest sdk/python/tests/ -v
 
   mcp:
-    name: MCP Server
+    name: MCP server
     needs: typescript
     runs-on: ubuntu-latest
     steps:
