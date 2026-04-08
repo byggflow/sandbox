@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/byggflow/sandbox/agent/env"
@@ -143,7 +143,7 @@ func (d *Dispatcher) negotiateE2E(params json.RawMessage) (interface{}, error) {
 	d.cryptoSession = session
 	d.mu.Unlock()
 
-	log.Printf("e2e encryption negotiated")
+	slog.Info("e2e encryption negotiated")
 
 	return map[string]string{
 		"public_key": base64.StdEncoding.EncodeToString(kp.Public.Bytes()),
@@ -185,7 +185,7 @@ func (d *Dispatcher) Handle(req *proto.Request, rw io.ReadWriter) {
 	}
 
 	if err != nil {
-		log.Printf("error handling %s: %v", req.Method, err)
+		slog.Error("error handling request", "method", req.Method, "error", err)
 		d.sendError(rw, req.ID, -32000, err.Error())
 		return
 	}
@@ -206,7 +206,7 @@ func (d *Dispatcher) Handle(req *proto.Request, rw io.ReadWriter) {
 	}
 
 	if err := codec.WriteJSON(rw, resp); err != nil {
-		log.Printf("error writing response for %s: %v", req.Method, err)
+		slog.Error("error writing response", "method", req.Method, "error", err)
 	}
 }
 
@@ -247,6 +247,6 @@ func (d *Dispatcher) sendError(w io.Writer, id int, code int, msg string) {
 		},
 	}
 	if err := codec.WriteJSON(w, resp); err != nil {
-		log.Printf("error writing error response: %v", err)
+		slog.Error("error writing error response", "error", err)
 	}
 }

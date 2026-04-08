@@ -29,6 +29,17 @@ type WarmContainer struct {
 	RuntimeName string
 }
 
+// destroyWorkers is the max concurrent background container destroys.
+const destroyWorkers = 5
+
+// truncateID safely truncates a container ID for logging.
+func truncateID(id string) string {
+	if len(id) > 12 {
+		return id[:12]
+	}
+	return id
+}
+
 // Manager maintains a warm pool of pre-started containers.
 type Manager struct {
 	runtimes map[string]runtime.Runtime
@@ -40,6 +51,14 @@ type Manager struct {
 	freq  map[string][]time.Time      // image -> creation timestamps (sliding window)
 	close chan struct{}
 	wg    sync.WaitGroup
+
+	destroyCh chan destroyRequest // bounded channel for async container destroys
+}
+
+// destroyRequest is a request to destroy a container in the background.
+type destroyRequest struct {
+	containerID string
+	runtimeName string
 }
 
 // Status describes the state of a pool profile.
@@ -54,12 +73,13 @@ type Status struct {
 // NewManager creates a new pool manager.
 func NewManager(runtimes map[string]runtime.Runtime, cfg config.PoolConfig, log *slog.Logger) *Manager {
 	return &Manager{
-		runtimes: runtimes,
-		cfg:      cfg,
-		log:      log,
-		warm:     make(map[string][]*WarmContainer),
-		freq:     make(map[string][]time.Time),
-		close:    make(chan struct{}),
+		runtimes:  runtimes,
+		cfg:       cfg,
+		log:       log,
+		warm:      make(map[string][]*WarmContainer),
+		freq:      make(map[string][]time.Time),
+		close:     make(chan struct{}),
+		destroyCh: make(chan destroyRequest, 64),
 	}
 }
 
@@ -92,6 +112,12 @@ func (m *Manager) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Start background destroy workers.
+	for i := 0; i < destroyWorkers; i++ {
+		m.wg.Add(1)
+		go m.destroyWorker()
+	}
+
 	// Start health check loop.
 	m.wg.Add(1)
 	go m.healthLoop()
@@ -101,6 +127,53 @@ func (m *Manager) Start(ctx context.Context) error {
 	go m.rebalanceLoop()
 
 	return nil
+}
+
+// destroyWorker processes async container destroy requests.
+func (m *Manager) destroyWorker() {
+	defer m.wg.Done()
+	for {
+		select {
+		case <-m.close:
+			// Drain remaining requests with a shutdown-scoped context.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			for {
+				select {
+				case req := <-m.destroyCh:
+					m.doDestroy(ctx, req)
+				default:
+					cancel()
+					return
+				}
+			}
+		case req := <-m.destroyCh:
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			m.doDestroy(ctx, req)
+			cancel()
+		}
+	}
+}
+
+func (m *Manager) doDestroy(ctx context.Context, req destroyRequest) {
+	if rt, ok := m.runtimes[req.runtimeName]; ok {
+		if err := rt.Destroy(ctx, req.containerID); err != nil {
+			m.log.Error("background container destroy failed", "container", truncateID(req.containerID), "error", err)
+		}
+	}
+}
+
+// asyncDestroy enqueues a container destroy to the bounded worker pool.
+// Falls back to inline destroy if the queue is full.
+func (m *Manager) asyncDestroy(containerID, runtimeName string) {
+	select {
+	case m.destroyCh <- destroyRequest{containerID: containerID, runtimeName: runtimeName}:
+	default:
+		// Queue full — destroy inline to avoid leaking containers.
+		m.log.Warn("destroy queue full, destroying inline", "container", truncateID(containerID))
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		m.doDestroy(ctx, destroyRequest{containerID: containerID, runtimeName: runtimeName})
+		cancel()
+	}
 }
 
 // Stop shuts down the pool manager and destroys all warm containers.
@@ -117,7 +190,9 @@ func (m *Manager) Stop(ctx context.Context) {
 				wc.Agent.Close()
 			}
 			if rt, ok := m.runtimes[wc.RuntimeName]; ok {
-				_ = rt.Destroy(ctx, wc.ContainerID)
+				if err := rt.Destroy(ctx, wc.ContainerID); err != nil {
+					m.log.Error("failed to destroy warm container on stop", "container", truncateID(wc.ContainerID), "error", err)
+				}
 			}
 		}
 		delete(m.warm, image)
@@ -146,15 +221,9 @@ func (m *Manager) Claim(image string) (*WarmContainer, bool) {
 		// Liveness ping.
 		if wc.Agent != nil {
 			if err := wc.Agent.Ping(livenessTimeout); err != nil {
-				m.log.Warn("warm container failed liveness", "container", wc.ContainerID[:12], "error", err)
+				m.log.Warn("warm container failed liveness", "container", truncateID(wc.ContainerID), "error", err)
 				wc.Agent.Close()
-				go func(id, rtName string) {
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					if rt, ok := m.runtimes[rtName]; ok {
-						_ = rt.Destroy(ctx, id)
-					}
-				}(wc.ContainerID, wc.RuntimeName)
+				m.asyncDestroy(wc.ContainerID, wc.RuntimeName)
 				continue
 			}
 		}
@@ -236,7 +305,9 @@ func (m *Manager) Resize(ctx context.Context, profile string, count int) error {
 				wc.Agent.Close()
 			}
 			if rt, ok := m.runtimes[wc.RuntimeName]; ok {
-				_ = rt.Destroy(ctx, wc.ContainerID)
+				if err := rt.Destroy(ctx, wc.ContainerID); err != nil {
+					m.log.Error("failed to destroy excess warm container", "container", truncateID(wc.ContainerID), "error", err)
+				}
 			}
 		}
 	} else {
@@ -269,7 +340,9 @@ func (m *Manager) Flush(ctx context.Context, profile string) error {
 			wc.Agent.Close()
 		}
 		if rt, ok := m.runtimes[wc.RuntimeName]; ok {
-			_ = rt.Destroy(ctx, wc.ContainerID)
+			if err := rt.Destroy(ctx, wc.ContainerID); err != nil {
+				m.log.Error("failed to destroy warm container on flush", "container", truncateID(wc.ContainerID), "error", err)
+			}
 		}
 	}
 
@@ -440,7 +513,7 @@ func (m *Manager) healthCheck() {
 				return
 			}
 			if err := e.wc.Agent.Ping(2 * time.Second); err != nil {
-				m.log.Warn("health check failed", "container", e.wc.ContainerID[:12], "error", err)
+				m.log.Warn("health check failed", "container", truncateID(e.wc.ContainerID), "error", err)
 				results[idx] = result{entry: e, alive: false}
 				return
 			}
@@ -466,13 +539,7 @@ func (m *Manager) healthCheck() {
 			if wc.Agent != nil {
 				wc.Agent.Close()
 			}
-			go func(id, rtName string) {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				if rt, ok := m.runtimes[rtName]; ok {
-					_ = rt.Destroy(ctx, id)
-				}
-			}(wc.ContainerID, wc.RuntimeName)
+			m.asyncDestroy(wc.ContainerID, wc.RuntimeName)
 		}
 	}
 	// Preserve images that were added after the snapshot was taken.

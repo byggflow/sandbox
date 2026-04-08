@@ -139,7 +139,7 @@ func (tm *TunnelManager) waitForPort(ctx context.Context, target string, timeout
 func (tm *TunnelManager) listen() (net.Listener, error) {
 	// OS-assigned ephemeral port.
 	if tm.portMin == 0 && tm.portMax == 0 {
-		return net.Listen("tcp", ":0")
+		return net.Listen("tcp", "127.0.0.1:0")
 	}
 
 	// Sequential scan within configured range.
@@ -150,7 +150,7 @@ func (tm *TunnelManager) listen() (net.Listener, error) {
 		if tm.allocated[port] {
 			continue
 		}
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue // port in use by another process
 		}

@@ -270,6 +270,20 @@ func (r *Registry) All() []*Sandbox {
 	return result
 }
 
+// MatchLabels returns true if the sandbox's labels match all the given filters.
+// Thread-safe: acquires the sandbox mutex.
+func (s *Sandbox) MatchLabels(filters map[string]string) bool {
+	s.mu.Lock()
+	labels := s.Labels
+	s.mu.Unlock()
+	for k, v := range filters {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // ContainerIP extracts the container IP from AgentAddr (strips the :port suffix).
 func (s *Sandbox) ContainerIP() string {
 	host, _, err := net.SplitHostPort(s.AgentAddr)

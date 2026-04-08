@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 
@@ -10,9 +10,6 @@ import (
 )
 
 func main() {
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.SetOutput(os.Stderr)
-
 	port := os.Getenv("SANDBOX_AGENT_PORT")
 	if port == "" {
 		port = "9111"
@@ -34,21 +31,25 @@ func main() {
 	case "vsock":
 		ln, err := listenVsock(port)
 		if err != nil {
-			log.Fatalf("vsock listen: %v", err)
+			slog.Error("vsock listen failed", "error", err)
+			os.Exit(1)
 		}
-		log.Printf("sandbox-agent starting on vsock port %s", port)
+		slog.Info("sandbox-agent starting", "transport", "vsock", "port", port)
 		if err := srv.Serve(ln); err != nil {
-			log.Fatalf("fatal: %v", err)
+			slog.Error("fatal error", "error", err)
+			os.Exit(1)
 		}
 	default:
 		addr := fmt.Sprintf(":%s", port)
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
-			log.Fatalf("tcp listen: %v", err)
+			slog.Error("tcp listen failed", "error", err)
+			os.Exit(1)
 		}
-		log.Printf("sandbox-agent starting on tcp %s", addr)
+		slog.Info("sandbox-agent starting", "transport", "tcp", "addr", addr)
 		if err := srv.Serve(ln); err != nil {
-			log.Fatalf("fatal: %v", err)
+			slog.Error("fatal error", "error", err)
+			os.Exit(1)
 		}
 	}
 }
