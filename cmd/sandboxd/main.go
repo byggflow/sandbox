@@ -15,6 +15,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+var version = "0.0.0"
+
 func main() {
 	configPath := flag.String("config", "", "path to config file (TOML)")
 	flag.Parse()

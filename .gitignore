@@ -1,5 +1,8 @@
 # Go
 bin/
+/sbx
+/sandboxd
+/sandbox-agent
 *.exe
 *.test
 

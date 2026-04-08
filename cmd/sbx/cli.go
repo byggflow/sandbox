@@ -13,7 +13,7 @@ import (
 	sandbox "github.com/byggflow/sandbox/sdk/go"
 )
 
-const version = "0.0.1"
+var version = "0.0.0"
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage: sbx <command> [options]

@@ -1,6 +1,6 @@
 {
   "name": "@byggflow/sandbox",
-  "version": "0.0.1",
+  "version": "0.0.0",
   "description": "TypeScript SDK for sandboxd",
   "type": "module",
   "main": "./dist/index.cjs",
