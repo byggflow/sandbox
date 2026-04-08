@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -44,7 +44,7 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	log.Printf("agent listening on %s", s.addr)
+	slog.Info("agent listening", "addr", s.addr)
 	return s.Serve(ln)
 }
 
@@ -59,7 +59,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
-		log.Printf("received %v, shutting down", sig)
+		slog.Info("received signal, shutting down", "signal", sig)
 		close(s.quit)
 		s.listener.Close()
 	}()
@@ -72,7 +72,7 @@ func (s *Server) Serve(ln net.Listener) error {
 				s.wg.Wait()
 				return nil
 			default:
-				log.Printf("accept error: %v", err)
+				slog.Error("accept error", "error", err)
 				continue
 			}
 		}
@@ -87,7 +87,7 @@ func (s *Server) Serve(ln net.Listener) error {
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
-	log.Printf("connection from %s", conn.RemoteAddr())
+	slog.Info("connection accepted", "remote", conn.RemoteAddr())
 
 	// If auth token is configured, require it as the first RPC call.
 	if s.authToken != "" {
@@ -108,7 +108,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		frame, err := codec.ReadFrame(conn)
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("read frame error: %v", err)
+				slog.Error("read frame error", "error", err)
 			}
 			return
 		}
@@ -117,7 +117,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		case proto.FramePing:
 			if len(frame.Payload) == 1 && frame.Payload[0] == proto.PingRequest {
 				if err := codec.WritePong(conn); err != nil {
-					log.Printf("write pong error: %v", err)
+					slog.Error("write pong error", "error", err)
 					return
 				}
 			}
@@ -125,11 +125,11 @@ func (s *Server) handleConn(conn net.Conn) {
 		case proto.FrameJSON:
 			var req proto.Request
 			if err := json.Unmarshal(frame.Payload, &req); err != nil {
-				log.Printf("invalid json-rpc request: %v", err)
+				slog.Warn("invalid json-rpc request", "error", err)
 				continue
 			}
 			if req.JSONRPC != "2.0" {
-				log.Printf("invalid jsonrpc version: %s", req.JSONRPC)
+				slog.Warn("invalid jsonrpc version", "version", req.JSONRPC)
 				continue
 			}
 			s.dispatcher.Handle(&req, rw)
@@ -141,7 +141,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			s.handleBinaryFrame(frame.Payload)
 
 		default:
-			log.Printf("unexpected frame type: 0x%02x", frame.Type)
+			slog.Warn("unexpected frame type", "type", fmt.Sprintf("0x%02x", frame.Type))
 		}
 	}
 }
@@ -150,7 +150,7 @@ func (s *Server) handleConn(conn net.Conn) {
 // Protocol: first 4 bytes are big-endian PID, rest is data.
 func (s *Server) handleBinaryFrame(payload []byte) {
 	if len(payload) < 4 {
-		log.Printf("binary frame too short: %d bytes", len(payload))
+		slog.Warn("binary frame too short", "bytes", len(payload))
 		return
 	}
 
@@ -159,7 +159,7 @@ func (s *Server) handleBinaryFrame(payload []byte) {
 
 	ptyMgr := s.dispatcher.PtyManager()
 	if err := ptyMgr.WritePtyInput(pid, data); err != nil {
-		log.Printf("pty input error (pid %d): %v", pid, err)
+		slog.Error("pty input error", "pid", pid, "error", err)
 	}
 }
 
@@ -172,23 +172,23 @@ func (s *Server) authenticateConn(conn net.Conn) bool {
 
 	frame, err := codec.ReadFrame(conn)
 	if err != nil {
-		log.Printf("auth: failed to read frame: %v", err)
+		slog.Error("auth: failed to read frame", "error", err)
 		return false
 	}
 
 	if frame.Type != proto.FrameJSON {
-		log.Printf("auth: expected JSON frame, got 0x%02x", frame.Type)
+		slog.Warn("auth: expected JSON frame", "type", fmt.Sprintf("0x%02x", frame.Type))
 		return false
 	}
 
 	var req proto.Request
 	if err := json.Unmarshal(frame.Payload, &req); err != nil {
-		log.Printf("auth: invalid JSON-RPC: %v", err)
+		slog.Warn("auth: invalid JSON-RPC", "error", err)
 		return false
 	}
 
 	if req.Method != "auth.token" {
-		log.Printf("auth: expected auth.token, got %s", req.Method)
+		slog.Warn("auth: expected auth.token", "method", req.Method)
 		s.sendAuthError(conn, req.ID, "first call must be auth.token")
 		return false
 	}
@@ -198,7 +198,7 @@ func (s *Server) authenticateConn(conn net.Conn) bool {
 	}
 	raw, _ := json.Marshal(req.Params)
 	if err := json.Unmarshal(raw, &params); err != nil || subtle.ConstantTimeCompare([]byte(params.Token), []byte(s.authToken)) != 1 {
-		log.Printf("auth: invalid token from %s", conn.RemoteAddr())
+		slog.Warn("auth: invalid token", "remote", conn.RemoteAddr())
 		s.sendAuthError(conn, req.ID, "invalid token")
 		return false
 	}
@@ -211,7 +211,7 @@ func (s *Server) authenticateConn(conn net.Conn) bool {
 	}
 	codec.WriteJSON(conn, resp)
 
-	log.Printf("auth: connection authenticated from %s", conn.RemoteAddr())
+	slog.Info("auth: connection authenticated", "remote", conn.RemoteAddr())
 	return true
 }
 

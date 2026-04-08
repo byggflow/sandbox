@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -101,7 +101,7 @@ func (m *PtyManager) StartPty(raw json.RawMessage, conn io.ReadWriter) (interfac
 			n, err := ptm.Read(buf)
 			if n > 0 {
 				if writeErr := codec.WriteBinary(conn, buf[:n]); writeErr != nil {
-					log.Printf("pty write binary error (pid %d): %v", pid, writeErr)
+					slog.Error("pty write binary error", "pid", pid, "error", writeErr)
 					break
 				}
 			}
