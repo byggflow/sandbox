@@ -27,7 +27,7 @@ jobs:
         run: go test ./... -race -count=1
 
       - name: Build
-        run: make build
+        run: make build-sandboxd build-sbx build-agent
 
   typescript:
     name: TypeScript SDK
