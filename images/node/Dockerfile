@@ -1,4 +1,4 @@
-FROM byggflow/sandbox-base:latest AS base
+FROM ghcr.io/byggflow/sandbox-base:latest AS base
 
 FROM node:22-alpine
 RUN apk add --no-cache ca-certificates curl git bash coreutils
