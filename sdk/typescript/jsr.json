@@ -1,10 +1,11 @@
 {
   "name": "@byggflow/sandbox",
   "version": "0.0.0",
+  "description": "TypeScript SDK for creating and managing Byggflow sandboxes with filesystem, process, environment, and network access.",
   "license": "MIT",
   "exports": "./src/index.ts",
   "publish": {
-    "include": ["src/**/*.ts"],
+    "include": ["src/**/*.ts", "README.md"],
     "exclude": ["src/**/*.test.ts", "src/__integration__"]
   }
 }

@@ -1,5 +1,6 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 
+/** Authentication credential: a bearer token string, static headers, an async header resolver, or a request signer. */
 export type Auth =
   | string
   | Record<string, string>
