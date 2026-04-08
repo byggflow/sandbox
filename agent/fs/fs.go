@@ -15,6 +15,82 @@ import (
 	proto "github.com/byggflow/sandbox/protocol"
 )
 
+// allowedPrefixes are the directories that filesystem operations are restricted to.
+// Paths outside these prefixes are rejected to prevent information disclosure
+// (e.g. reading /etc/shadow, /proc/*/environ) even though the container has
+// read-only rootfs and dropped capabilities.
+var allowedPrefixes = []string{"/root", "/tmp"}
+
+func init() {
+	if v := os.Getenv("SANDBOX_FS_ALLOWED"); v != "" {
+		allowedPrefixes = strings.Split(v, ":")
+	}
+}
+
+// safePath resolves a path and checks it falls within an allowed prefix.
+// Returns the cleaned absolute path or an error.
+func safePath(raw string) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("path is required")
+	}
+
+	// Evaluate symlinks and resolve to absolute path.
+	// Use filepath.Clean first in case the path doesn't exist yet.
+	cleaned := filepath.Clean(raw)
+	if !filepath.IsAbs(cleaned) {
+		cleaned = filepath.Join("/root", cleaned)
+	}
+
+	// Try to resolve symlinks for the longest existing prefix.
+	resolved, err := resolveExisting(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+
+	for _, prefix := range allowedPrefixes {
+		// Resolve the prefix itself so symlinks in the prefix (e.g. /tmp -> /private/tmp)
+		// are handled correctly.
+		resolvedPrefix, err := resolveExisting(prefix)
+		if err != nil {
+			resolvedPrefix = filepath.Clean(prefix)
+		}
+		if resolved == resolvedPrefix || strings.HasPrefix(resolved, resolvedPrefix+"/") {
+			return resolved, nil
+		}
+		// Also check the raw prefix for cases where the path doesn't exist on disk.
+		cleanPrefix := filepath.Clean(prefix)
+		if resolved == cleanPrefix || strings.HasPrefix(resolved, cleanPrefix+"/") {
+			return resolved, nil
+		}
+	}
+
+	return "", fmt.Errorf("access denied: path %q is outside allowed directories", raw)
+}
+
+// resolveExisting resolves symlinks for the longest existing ancestor of path,
+// then appends the remaining unresolved suffix. This handles the case where the
+// target file doesn't exist yet (e.g. fs.write to a new file).
+func resolveExisting(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		return resolved, nil
+	}
+
+	// Walk up until we find a path that exists.
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	if dir == path {
+		// Reached filesystem root without finding an existing path.
+		return path, nil
+	}
+
+	resolvedDir, err := resolveExisting(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(resolvedDir, base), nil
+}
+
 // Conn is an alias for io.ReadWriter used by handlers that need binary frame I/O.
 type Conn = io.ReadWriter
 
@@ -75,11 +151,13 @@ func Read(raw json.RawMessage, conn Conn) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Path == "" {
-		return nil, fmt.Errorf("path is required")
+
+	path, err := safePath(p.Path)
+	if err != nil {
+		return nil, err
 	}
 
-	data, err := os.ReadFile(p.Path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
@@ -121,11 +199,13 @@ func Write(raw json.RawMessage, conn Conn) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Path == "" {
-		return nil, fmt.Errorf("path is required")
+
+	path, err := safePath(p.Path)
+	if err != nil {
+		return nil, err
 	}
 
-	dir := filepath.Dir(p.Path)
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create parent dirs: %w", err)
 	}
@@ -140,7 +220,7 @@ func Write(raw json.RawMessage, conn Conn) (interface{}, error) {
 			}
 			data = append(data, frame.Payload...)
 		}
-		if err := os.WriteFile(p.Path, data, 0644); err != nil {
+		if err := os.WriteFile(path, data, 0644); err != nil {
 			return nil, fmt.Errorf("write file: %w", err)
 		}
 	} else {
@@ -149,7 +229,7 @@ func Write(raw json.RawMessage, conn Conn) (interface{}, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read binary frame: %w", err)
 		}
-		if err := os.WriteFile(p.Path, frame.Payload, 0644); err != nil {
+		if err := os.WriteFile(path, frame.Payload, 0644); err != nil {
 			return nil, fmt.Errorf("write file: %w", err)
 		}
 	}
@@ -163,11 +243,13 @@ func List(raw json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Path == "" {
-		return nil, fmt.Errorf("path is required")
+
+	path, err := safePath(p.Path)
+	if err != nil {
+		return nil, err
 	}
 
-	entries, err := os.ReadDir(p.Path)
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, fmt.Errorf("read dir: %w", err)
 	}
@@ -190,11 +272,13 @@ func Stat(raw json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Path == "" {
-		return nil, fmt.Errorf("path is required")
+
+	path, err := safePath(p.Path)
+	if err != nil {
+		return nil, err
 	}
 
-	info, err := os.Stat(p.Path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat: %w", err)
 	}
@@ -209,15 +293,16 @@ func Remove(raw json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Path == "" {
-		return nil, fmt.Errorf("path is required")
+
+	path, err := safePath(p.Path)
+	if err != nil {
+		return nil, err
 	}
 
-	var err error
 	if p.Recursive {
-		err = os.RemoveAll(p.Path)
+		err = os.RemoveAll(path)
 	} else {
-		err = os.Remove(p.Path)
+		err = os.Remove(path)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("remove: %w", err)
@@ -232,11 +317,17 @@ func Rename(raw json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Old == "" || p.New == "" {
-		return nil, fmt.Errorf("old and new are required")
+
+	oldPath, err := safePath(p.Old)
+	if err != nil {
+		return nil, err
+	}
+	newPath, err := safePath(p.New)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := os.Rename(p.Old, p.New); err != nil {
+	if err := os.Rename(oldPath, newPath); err != nil {
 		return nil, fmt.Errorf("rename: %w", err)
 	}
 
@@ -249,15 +340,16 @@ func Mkdir(raw json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Path == "" {
-		return nil, fmt.Errorf("path is required")
+
+	path, err := safePath(p.Path)
+	if err != nil {
+		return nil, err
 	}
 
-	var err error
 	if p.Recursive {
-		err = os.MkdirAll(p.Path, 0755)
+		err = os.MkdirAll(path, 0755)
 	} else {
-		err = os.Mkdir(p.Path, 0755)
+		err = os.Mkdir(path, 0755)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("mkdir: %w", err)
@@ -272,8 +364,10 @@ func Upload(raw json.RawMessage, conn Conn) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Path == "" {
-		return nil, fmt.Errorf("path is required")
+
+	path, err := safePath(p.Path)
+	if err != nil {
+		return nil, err
 	}
 
 	frame, err := codec.ReadFrame(conn)
@@ -281,7 +375,7 @@ func Upload(raw json.RawMessage, conn Conn) (interface{}, error) {
 		return nil, fmt.Errorf("read binary frame: %w", err)
 	}
 
-	if err := os.MkdirAll(p.Path, 0755); err != nil {
+	if err := os.MkdirAll(path, 0755); err != nil {
 		return nil, fmt.Errorf("create target dir: %w", err)
 	}
 
@@ -295,31 +389,38 @@ func Upload(raw json.RawMessage, conn Conn) (interface{}, error) {
 			return nil, fmt.Errorf("read tar: %w", err)
 		}
 
-		target := filepath.Join(p.Path, hdr.Name)
+		// Reject symlink entries to prevent symlink-based escape attacks.
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			return nil, fmt.Errorf("tar entry %q: symlinks and hard links are not allowed", hdr.Name)
+		}
+
+		target := filepath.Join(path, hdr.Name)
 
 		// Prevent path traversal: resolved path must stay within the base directory.
-		cleanBase := filepath.Clean(p.Path) + string(filepath.Separator)
-		if !strings.HasPrefix(filepath.Clean(target)+string(filepath.Separator), cleanBase) && filepath.Clean(target) != filepath.Clean(p.Path) {
-			return nil, fmt.Errorf("tar entry %q escapes target directory", hdr.Name)
+		// Use safePath to resolve symlinks on disk, not just lexical checks,
+		// so that pre-existing symlinks cannot be used to escape the sandbox.
+		resolvedTarget, err := safePath(target)
+		if err != nil {
+			return nil, fmt.Errorf("tar entry %q: %w", hdr.Name, err)
 		}
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)); err != nil {
-				return nil, fmt.Errorf("mkdir %s: %w", target, err)
+			if err := os.MkdirAll(resolvedTarget, os.FileMode(hdr.Mode)); err != nil {
+				return nil, fmt.Errorf("mkdir %s: %w", resolvedTarget, err)
 			}
 		case tar.TypeReg:
-			dir := filepath.Dir(target)
+			dir := filepath.Dir(resolvedTarget)
 			if err := os.MkdirAll(dir, 0755); err != nil {
 				return nil, fmt.Errorf("mkdir parent %s: %w", dir, err)
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			f, err := os.OpenFile(resolvedTarget, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
 			if err != nil {
-				return nil, fmt.Errorf("create file %s: %w", target, err)
+				return nil, fmt.Errorf("create file %s: %w", resolvedTarget, err)
 			}
 			if _, err := io.Copy(f, tr); err != nil {
 				f.Close()
-				return nil, fmt.Errorf("write file %s: %w", target, err)
+				return nil, fmt.Errorf("write file %s: %w", resolvedTarget, err)
 			}
 			f.Close()
 		}
@@ -334,25 +435,27 @@ func Download(raw json.RawMessage, conn Conn) (interface{}, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	if p.Path == "" {
-		return nil, fmt.Errorf("path is required")
+
+	path, err := safePath(p.Path)
+	if err != nil {
+		return nil, err
 	}
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 
-	info, err := os.Stat(p.Path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat: %w", err)
 	}
 
 	if !info.IsDir() {
 		// Single file
-		if err := addFileToTar(tw, p.Path, info.Name()); err != nil {
+		if err := addFileToTar(tw, path, info.Name()); err != nil {
 			return nil, err
 		}
 	} else {
-		base := p.Path
+		base := path
 		err = filepath.Walk(base, func(path string, fi os.FileInfo, err error) error {
 			if err != nil {
 				return err

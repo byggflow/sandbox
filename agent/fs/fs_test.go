@@ -12,6 +12,19 @@ import (
 	proto "github.com/byggflow/sandbox/protocol"
 )
 
+func TestMain(m *testing.M) {
+	// Unit tests run on the host where temp dirs are outside /root and /tmp.
+	// Override allowed prefixes to include the OS temp dir and its symlink target.
+	tmpDir := os.TempDir()
+	allowedPrefixes = append(allowedPrefixes, tmpDir)
+	if resolved, err := filepath.EvalSymlinks(tmpDir); err == nil && resolved != tmpDir {
+		allowedPrefixes = append(allowedPrefixes, resolved)
+	}
+	// macOS uses /var/folders for t.TempDir() which is under /private/var
+	allowedPrefixes = append(allowedPrefixes, "/var/folders", "/private/var/folders")
+	os.Exit(m.Run())
+}
+
 // mockConn implements Conn for testing, backed by read/write buffers.
 type mockConn struct {
 	readBuf  *bytes.Buffer
@@ -252,6 +265,71 @@ func TestUploadDownload(t *testing.T) {
 	}
 	if string(data) != "content" {
 		t.Errorf("content = %q, want content", data)
+	}
+}
+
+func TestSafePathBlocks(t *testing.T) {
+	// Temporarily restrict to only /root and /tmp.
+	saved := allowedPrefixes
+	allowedPrefixes = []string{"/root", "/tmp"}
+	defer func() { allowedPrefixes = saved }()
+
+	blocked := []string{
+		"/etc/shadow",
+		"/etc/passwd",
+		"/proc/1/environ",
+		"/proc/self/cmdline",
+		"/root/../etc/passwd",
+		"/root/../../etc/shadow",
+		"/var/log/messages",
+		"/sys/kernel/hostname",
+	}
+
+	for _, p := range blocked {
+		_, err := safePath(p)
+		if err == nil {
+			t.Errorf("safePath(%q) should be blocked but was allowed", p)
+		}
+	}
+}
+
+func TestSafePathAllows(t *testing.T) {
+	saved := allowedPrefixes
+	allowedPrefixes = []string{"/root", "/tmp"}
+	defer func() { allowedPrefixes = saved }()
+
+	allowed := []string{
+		"/root/file.txt",
+		"/root/subdir/file.txt",
+		"/tmp/scratch",
+		"/root",
+		"/tmp",
+	}
+
+	for _, p := range allowed {
+		result, err := safePath(p)
+		if err != nil {
+			t.Errorf("safePath(%q) should be allowed but got error: %v", p, err)
+			continue
+		}
+		if result == "" {
+			t.Errorf("safePath(%q) returned empty string", p)
+		}
+	}
+}
+
+func TestSafePathRelative(t *testing.T) {
+	saved := allowedPrefixes
+	allowedPrefixes = []string{"/root", "/tmp"}
+	defer func() { allowedPrefixes = saved }()
+
+	// Relative paths should be resolved under /root
+	result, err := safePath("file.txt")
+	if err != nil {
+		t.Fatalf("safePath(relative) error: %v", err)
+	}
+	if result != "/root/file.txt" {
+		t.Errorf("safePath(relative) = %q, want /root/file.txt", result)
 	}
 }
 

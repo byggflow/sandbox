@@ -8,8 +8,8 @@ data_dir = "/var/lib/sandboxd"
 
 [limits]
 max_sandboxes = 10
-max_memory = "256m"
-max_cpu = 1.0
+max_memory = "1g"
+max_cpu = 2.0
 max_ttl = 3600
 max_templates = 10
 max_template_size = "512m"
