@@ -149,32 +149,33 @@ jobs:
       - name: Publish to JSR
         run: cd sdk/typescript && npx jsr publish --allow-dirty
 
-  pypi:
-    name: Publish Python SDK
-    needs: release
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version = .*/version = \"$VERSION\"/" sdk/python/pyproject.toml
-
-      - name: Build
-        run: pip install build && python -m build sdk/python
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: sdk/python/dist/
+  # TODO: uncomment when PyPI org is approved
+  # pypi:
+  #   name: Publish Python SDK
+  #   needs: release
+  #   runs-on: ubuntu-latest
+  #   environment: pypi
+  #   permissions:
+  #     id-token: write
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - uses: actions/setup-python@v5
+  #       with:
+  #         python-version: "3.13"
+  #
+  #     - name: Set version from tag
+  #       run: |
+  #         VERSION="${GITHUB_REF_NAME#v}"
+  #         sed -i "s/^version = .*/version = \"$VERSION\"/" sdk/python/pyproject.toml
+  #
+  #     - name: Build
+  #       run: pip install build && python -m build sdk/python
+  #
+  #     - name: Publish to PyPI
+  #       uses: pypa/gh-action-pypi-publish@release/v1
+  #       with:
+  #         packages-dir: sdk/python/dist/
 
   docker:
     name: Docker images
