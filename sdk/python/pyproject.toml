@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "byggflow-sandbox"
-version = "0.1.0"
+version = "0.0.0"
 description = "Python SDK for sandboxd — high-frequency container sandboxing as a service"
 requires-python = ">=3.10"
 license = "MIT"
