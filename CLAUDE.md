@@ -59,23 +59,11 @@ Go is the primary language for the daemon, agent, CLI, and Go SDK.
 
 ## TypeScript (sdk/typescript/)
 
-Default to using Bun instead of Node.js as the runtime and package manager.
+Prefer Bun as the local dev runtime and package manager for speed, but **published libraries must work on Node, Bun, Deno, and browsers**.
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
-- Bun automatically loads .env, so don't use dotenv.
-
-### Bun APIs
-
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile.
-- `Bun.$\`ls\`` instead of execa.
+- Use `bun install`, `bun run <script>`, and `bunx` for local development.
+- In library/SDK source code, use `node:` prefixed imports (e.g. `node:fs`, `node:crypto`) instead of Bun-specific APIs. This ensures cross-runtime compatibility.
+- Bun-specific APIs (`Bun.serve`, `Bun.file`, `bun:sqlite`, etc.) are fine in internal tooling and scripts that only run locally, but never in published packages.
 
 ### Testing
 
