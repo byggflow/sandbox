@@ -1,5 +1,6 @@
 import { ConnectionError, RpcError, SessionReplacedError } from "./errors.ts";
 
+/** Transport layer for JSON-RPC communication with the sandbox agent. */
 export interface RpcTransport {
   call(method: string, params: unknown): Promise<unknown>;
   /** Send a JSON-RPC call followed by binary frame(s), wait for JSON response. */
@@ -25,6 +26,7 @@ interface PendingRequest {
 const MAX_FRAME_SIZE = 10 * 1024 * 1024; // 10MB
 const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB
 
+/** WebSocket-based RPC transport. */
 export class WsTransport implements RpcTransport {
   private ws: WebSocket | null = null;
   private nextId = 1;

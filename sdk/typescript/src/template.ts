@@ -2,6 +2,7 @@ import type { Auth } from "./auth.ts";
 import { resolveAuth } from "./auth.ts";
 import { DEFAULT_ENDPOINT } from "./sandbox.ts";
 
+/** Client for listing, fetching, and deleting sandbox templates. */
 export interface TemplateManager {
   list(): Promise<{ id: string; label: string }[]>;
   get(id: string): Promise<{ id: string; label: string }>;
@@ -21,6 +22,7 @@ function resolveHttpEndpoint(endpoint: string): string {
   return endpoint.replace(/\/$/, "");
 }
 
+/** Create a template manager for listing, fetching, and deleting templates. */
 export function templates(opts?: TemplateOptions): TemplateManager {
   const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
   const httpBase = resolveHttpEndpoint(endpoint);

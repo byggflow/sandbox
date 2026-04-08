@@ -7,8 +7,10 @@ import { CapacityError, ConnectionError } from "./errors.ts";
 import { WsTransport } from "./transport.ts";
 import type { RpcTransport } from "./transport.ts";
 
+/** Default daemon endpoint using a Unix domain socket. */
 export const DEFAULT_ENDPOINT = "unix:///var/run/sandboxd/sandboxd.sock";
 
+/** Options for creating a new sandbox. */
 export interface SandboxOptions {
   /** Daemon endpoint. Defaults to unix:///var/run/sandboxd/sandboxd.sock */
   endpoint?: string;
@@ -22,6 +24,7 @@ export interface SandboxOptions {
   encrypted?: boolean;
 }
 
+/** Options for connecting to an existing sandbox by ID. */
 export interface ConnectOptions {
   endpoint?: string;
   auth?: Auth;
@@ -29,6 +32,7 @@ export interface ConnectOptions {
   retry?: boolean;
 }
 
+/** Result of a completed process execution. */
 export interface ExecResult {
   stdout: string;
   stderr: string;
@@ -49,6 +53,7 @@ export interface StreamExecHandle {
   exitCode: Promise<number>;
 }
 
+/** Handle for a spawned process with streaming I/O. */
 export interface SpawnHandle {
   stdout: AsyncIterable<Uint8Array>;
   stderr: AsyncIterable<Uint8Array>;
@@ -58,6 +63,7 @@ export interface SpawnHandle {
   wait(): Promise<{ exitCode: number }>;
 }
 
+/** Handle for a pseudo-terminal session. */
 export interface PtyHandle {
   data: AsyncIterable<Uint8Array>;
   write(data: string | Uint8Array): void;
@@ -67,12 +73,14 @@ export interface PtyHandle {
   wait(): Promise<{ exitCode: number }>;
 }
 
+/** Information about an exposed port tunnel. */
 export interface TunnelInfo {
   port: number;
   host_port: number;
   url: string;
 }
 
+/** A connected sandbox with filesystem, process, environment, and network access. */
 export interface Sandbox {
   id: string;
   fs: {
@@ -407,6 +415,7 @@ function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, au
   };
 }
 
+/** Create a new sandbox and return a connected handle. */
 export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
   const { http, ws } = resolveEndpoints(endpoint);
@@ -464,6 +473,7 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   return buildSandbox(sandboxId, transport, http, headers);
 }
 
+/** Connect to an existing sandbox by ID. */
 export async function connectSandbox(id: string, opts?: ConnectOptions): Promise<Sandbox> {
   const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
   const { ws } = resolveEndpoints(endpoint);
