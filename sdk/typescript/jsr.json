@@ -1,0 +1,10 @@
+{
+  "name": "@byggflow/sandbox",
+  "version": "0.0.1",
+  "license": "MIT",
+  "exports": "./src/index.ts",
+  "publish": {
+    "include": ["src/**/*.ts"],
+    "exclude": ["src/**/*.test.ts", "src/__integration__"]
+  }
+}

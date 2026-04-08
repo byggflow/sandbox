@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   createSandbox,
   connectSandbox,
@@ -30,12 +31,33 @@ export async function resolveHeaders(auth: string | undefined): Promise<Record<s
   return { Authorization: `Bearer ${auth}` };
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Run a command and return { code, stdout, stderr }. */
+function spawn(
+  cmd: string,
+  args: string[],
+  opts?: { stdout?: "pipe" | "ignore"; stderr?: "pipe" | "ignore" },
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const proc = execFile(cmd, args, { maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+      resolve({
+        code: error ? (error as NodeJS.ErrnoException & { code?: number }).status ?? 1 : 0,
+        stdout: stdout ?? "",
+        stderr: stderr ?? "",
+      });
+    });
+    if (opts?.stdout === "ignore") proc.stdout?.destroy();
+    if (opts?.stderr === "ignore") proc.stderr?.destroy();
+  });
+}
+
 // ── Docker helpers ───────────────────────────────────────────────
 
 async function dockerAvailable(): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["docker", "info"], { stdout: "ignore", stderr: "ignore" });
-    return (await proc.exited) === 0;
+    const { code } = await spawn("docker", ["info"], { stdout: "ignore", stderr: "ignore" });
+    return code === 0;
   } catch {
     return false;
   }
@@ -43,13 +65,12 @@ async function dockerAvailable(): Promise<boolean> {
 
 async function isContainerRunning(): Promise<boolean> {
   try {
-    const proc = Bun.spawn(
-      ["docker", "inspect", "-f", "{{.State.Running}}", DOCKER_CONTAINER],
-      { stdout: "pipe", stderr: "ignore" },
+    const { code, stdout } = await spawn(
+      "docker",
+      ["inspect", "-f", "{{.State.Running}}", DOCKER_CONTAINER],
+      { stderr: "ignore" },
     );
-    const text = await new Response(proc.stdout).text();
-    await proc.exited;
-    return text.trim() === "true";
+    return code === 0 && stdout.trim() === "true";
   } catch {
     return false;
   }
@@ -64,38 +85,29 @@ async function isContainerRunning(): Promise<boolean> {
 
 async function startDockerDaemon(): Promise<void> {
   // Check if container exists but stopped
-  const inspect = Bun.spawn(
-    ["docker", "inspect", DOCKER_CONTAINER],
+  const { code: existsCode } = await spawn(
+    "docker",
+    ["inspect", DOCKER_CONTAINER],
     { stdout: "ignore", stderr: "ignore" },
   );
-  const exists = (await inspect.exited) === 0;
+  const exists = existsCode === 0;
 
   if (exists) {
-    const start = Bun.spawn(["docker", "start", DOCKER_CONTAINER], {
-      stdout: "ignore",
-      stderr: "pipe",
-    });
-    const code = await start.exited;
+    const { code, stderr } = await spawn("docker", ["start", DOCKER_CONTAINER]);
     if (code !== 0) {
-      const err = await new Response(start.stderr).text();
-      throw new Error(`Failed to start ${DOCKER_CONTAINER}: ${err}`);
+      throw new Error(`Failed to start ${DOCKER_CONTAINER}: ${stderr}`);
     }
   } else {
-    const run = Bun.spawn(
-      [
-        "docker", "run", "-d",
-        "--name", DOCKER_CONTAINER,
-        "--network", "host",
-        "-v", "/var/run/docker.sock:/var/run/docker.sock",
-        "-e", "SANDBOX_TCP=0.0.0.0:7522",
-        DOCKER_IMAGE,
-      ],
-      { stdout: "ignore", stderr: "pipe" },
-    );
-    const code = await run.exited;
+    const { code, stderr } = await spawn("docker", [
+      "run", "-d",
+      "--name", DOCKER_CONTAINER,
+      "--network", "host",
+      "-v", "/var/run/docker.sock:/var/run/docker.sock",
+      "-e", "SANDBOX_TCP=0.0.0.0:7522",
+      DOCKER_IMAGE,
+    ]);
     if (code !== 0) {
-      const err = await new Response(run.stderr).text();
-      throw new Error(`Failed to start ${DOCKER_CONTAINER}: ${err}`);
+      throw new Error(`Failed to start ${DOCKER_CONTAINER}: ${stderr}`);
     }
   }
 
@@ -108,7 +120,7 @@ async function startDockerDaemon(): Promise<void> {
     } catch {
       // not ready yet
     }
-    await Bun.sleep(200);
+    await sleep(200);
   }
   throw new McpError(
     "daemon_start_timeout",
@@ -187,8 +199,7 @@ export async function ensureDaemon(): Promise<DaemonConnection> {
   // Start daemon in Docker
   if (await isContainerRunning()) {
     console.error(`[sandbox-mcp] Existing ${DOCKER_CONTAINER} container is unhealthy, removing...`);
-    const rm = Bun.spawn(["docker", "rm", "-f", DOCKER_CONTAINER], { stdout: "ignore", stderr: "ignore" });
-    await rm.exited;
+    await spawn("docker", ["rm", "-f", DOCKER_CONTAINER], { stdout: "ignore", stderr: "ignore" });
   }
 
   if (!(await dockerAvailable())) {

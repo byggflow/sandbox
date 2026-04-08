@@ -42,6 +42,9 @@ jobs:
       - name: Install
         run: cd sdk/typescript && bun install --frozen-lockfile
 
+      - name: Build
+        run: cd sdk/typescript && bun run build
+
       - name: Test
         run: cd sdk/typescript && bunx --bun vitest run
 
@@ -63,6 +66,7 @@ jobs:
 
   mcp:
     name: MCP Server
+    needs: typescript
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,8 +75,14 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Install SDK
+        run: cd sdk/typescript && bun install --frozen-lockfile && bun run build
+
       - name: Install
         run: cd mcp && bun install --frozen-lockfile
+
+      - name: Build
+        run: cd mcp && bun run build
 
       - name: Test
         run: cd mcp && bunx --bun vitest run

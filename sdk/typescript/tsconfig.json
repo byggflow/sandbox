@@ -3,11 +3,10 @@
     // Environment setup & latest features
     "lib": ["ESNext"],
     "target": "ESNext",
-    "module": "Preserve",
+    "module": "ESNext",
     "moduleDetection": "force",
-    "jsx": "react-jsx",
     "allowJs": true,
-    "types": ["bun", "node"],
+    "types": ["node"],
 
     // Bundler mode
     "moduleResolution": "bundler",

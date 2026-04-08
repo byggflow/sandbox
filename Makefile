@@ -1,9 +1,9 @@
-.PHONY: all build build-sandboxd build-sbx build-agent test test-go test-ts test-py clean \
+.PHONY: all build build-sandboxd build-sbx build-agent build-ts test test-go test-ts test-mcp test-py clean \
        test-integration test-integration-up test-integration-down test-all
 
 all: build
 
-build: build-sandboxd build-sbx build-agent
+build: build-sandboxd build-sbx build-agent build-ts
 
 build-sandboxd:
 	go build -o bin/sandboxd ./cmd/sandboxd
@@ -14,17 +14,25 @@ build-sbx:
 build-agent:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/sandbox-agent ./cmd/sandbox-agent
 
-test: test-go test-ts test-py
+build-ts:
+	cd sdk/typescript && bun install && bun run build
+	cd mcp && bun install && bun run build
+
+test: test-go test-ts test-mcp test-py
 
 test-go:
 	go test ./...
 
 test-ts:
-	cd sdk/typescript && bun install && bunx --bun vitest run
+	cd sdk/typescript && bun install && bun run build && bunx --bun vitest run
+
+test-mcp:
+	cd mcp && bun install && bunx --bun vitest run
 
 test-py:
 	@if [ ! -d sdk/python/.venv ]; then \
 		python3 -m venv sdk/python/.venv && \
+		sdk/python/.venv/bin/pip install --upgrade pip --quiet && \
 		sdk/python/.venv/bin/pip install -e "sdk/python[dev]" --quiet; \
 	fi
 	sdk/python/.venv/bin/python -m pytest sdk/python/tests/ -v

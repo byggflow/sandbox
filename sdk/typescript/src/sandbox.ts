@@ -141,7 +141,7 @@ function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, au
           throw new Error("No binary data received for fs.read");
         }
         if (binary.length === 1) {
-          return binary[0];
+          return binary[0]!;
         }
         // Reassemble chunked response.
         let totalLen = 0;
@@ -198,7 +198,7 @@ function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, au
           throw new Error("No binary data received for fs.download");
         }
         if (binary.length === 1) {
-          return binary[0];
+          return binary[0]!;
         }
         // Reassemble chunked response.
         let totalLen = 0;
