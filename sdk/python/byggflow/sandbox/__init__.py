@@ -2,12 +2,12 @@
 
 Usage::
 
-    from sandbox import create_sandbox, connect_sandbox
+    from byggflow.sandbox import create_sandbox, connect_sandbox
 
-    sandbox = await create_sandbox()
-    result = await sandbox.process.exec_("echo hello")
+    sbx = await create_sandbox()
+    result = await sbx.process.exec_("echo hello")
     print(result.stdout)
-    await sandbox.close()
+    await sbx.close()
 """
 
 from .auth import Auth, RequestSigner, SignatureAuth, resolve_auth

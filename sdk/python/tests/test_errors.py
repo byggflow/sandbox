@@ -1,6 +1,6 @@
 """Tests for the error hierarchy."""
 
-from sandbox.errors import (
+from byggflow.sandbox.errors import (
     CapacityError,
     ConnectionError,
     FsError,

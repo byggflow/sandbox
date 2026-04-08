@@ -2,7 +2,7 @@
 
 import pytest
 
-from sandbox.auth import resolve_auth
+from byggflow.sandbox.auth import resolve_auth
 
 
 @pytest.mark.asyncio

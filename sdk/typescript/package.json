@@ -3,15 +3,29 @@
   "version": "0.0.1",
   "description": "TypeScript SDK for sandboxd",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
-  "files": ["src", "dist"],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": ["dist"],
   "scripts": {
-    "test": "bunx --bun vitest run",
-    "build": "bun build src/index.ts --outdir dist --target node"
+    "build": "tsup",
+    "test": "bunx --bun vitest run"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/node": "^22",
+    "tsup": "^8",
     "vitest": "latest"
   },
   "peerDependencies": {

@@ -53,7 +53,7 @@ export class WsTransport implements RpcTransport {
       this.ws.onopen = () => resolve();
 
       this.ws.onerror = (ev) => {
-        const msg = ev instanceof ErrorEvent ? ev.message : "WebSocket error";
+        const msg = "message" in ev && typeof ev.message === "string" ? ev.message : "WebSocket error";
         reject(new ConnectionError(msg));
       };
 

@@ -528,11 +528,13 @@ export function registerTools(server: McpServer): void {
         }
 
         // Local file: read and push through SDK
-        const file = Bun.file(source);
-        if (!(await file.exists())) {
+        const { readFile, access } = await import("node:fs/promises");
+        try {
+          await access(source);
+        } catch {
           return errorResult(new McpError("file_not_found", `Local file not found: ${source}`, "Check the file path."));
         }
-        const data = new Uint8Array(await file.arrayBuffer());
+        const data = new Uint8Array(await readFile(source));
         await sandbox.fs.write(destination, data);
         return {
           content: [{ type: "text", text: JSON.stringify({ path: destination, bytes_written: data.byteLength }) }],
@@ -568,13 +570,13 @@ export function registerTools(server: McpServer): void {
         }
 
         // Ensure parent directory exists
+        const { mkdir, writeFile } = await import("node:fs/promises");
         const dir = localPath.substring(0, localPath.lastIndexOf("/"));
         if (dir) {
-          const proc = Bun.spawn(["mkdir", "-p", dir], { stdout: "ignore", stderr: "ignore" });
-          await proc.exited;
+          await mkdir(dir, { recursive: true });
         }
 
-        await Bun.write(localPath, data);
+        await writeFile(localPath, data);
         return {
           content: [{ type: "text", text: JSON.stringify({ local_path: localPath, size: data.byteLength }) }],
         };
