@@ -220,6 +220,14 @@ scrape_configs:
 
 ## Upgrading
 
+### CLI
+
+Run `sbx update` to update the CLI to the latest release. Use `sbx update --check` to see if a newer version is available without installing it.
+
+The CLI also nudges you when a new version is available (checked once every 24 hours).
+
+### Daemon
+
 1. Download the new version.
 2. Stop the daemon (`systemctl stop sandboxd` or `docker compose down`).
 3. Replace the binaries.

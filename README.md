@@ -408,6 +408,8 @@ Port tunneling is available in all SDKs via the `net` category and in the MCP se
 |---|---|
 | `sbx version` | Client and server version |
 | `sbx health` | Daemon health and pool status |
+| `sbx update` | Update sbx to the latest release |
+| `sbx update --check` | Check for updates without installing |
 
 ## Configuration
 

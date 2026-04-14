@@ -30,6 +30,7 @@ Commands:
   tpl         Template operations (save, ls, rm)
   pool        Pool operations (status, resize, flush)
   health      Check daemon health
+  update      Update sbx to the latest version
   version     Print version information
 
 Environment:
