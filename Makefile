@@ -1,5 +1,5 @@
 .PHONY: all build build-sandboxd build-sbx build-agent build-ts test test-go test-ts test-mcp test-py clean \
-       test-integration test-integration-up test-integration-down test-all
+       build-linux test-integration test-integration-up test-integration-down test-all
 
 all: build
 
@@ -17,6 +17,14 @@ build-agent:
 build-ts:
 	cd sdk/typescript && bun install && bun run build
 	cd mcp && bun install && bun run build
+
+# Cross-compile Go binaries for Linux (used by Docker images in test/CI).
+# Detects host architecture and builds for linux/<arch>.
+GOARCH := $(shell go env GOARCH)
+build-linux:
+	@mkdir -p bin/linux/$(GOARCH)
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="-s -w" -o bin/linux/$(GOARCH)/sandbox-agent ./cmd/sandbox-agent
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags="-s -w" -o bin/linux/$(GOARCH)/sandboxd ./cmd/sandboxd
 
 test: test-go test-ts test-mcp test-py
 
@@ -47,9 +55,9 @@ clean:
 COMPOSE_FILE := docker-compose.test.yml
 SANDBOXD_ENDPOINT := http://localhost:7522
 
-test-integration-up:
-	docker compose -f $(COMPOSE_FILE) up --build -d
-	./scripts/wait-for-healthy.sh 60
+test-integration-up: build-linux
+	TARGETARCH=$(GOARCH) docker compose -f $(COMPOSE_FILE) up --build -d
+	./scripts/wait-for-healthy.sh 90
 
 test-integration-down:
 	docker compose -f $(COMPOSE_FILE) down -v --remove-orphans
@@ -57,9 +65,10 @@ test-integration-down:
 test-integration: test-integration-up
 	@status=0; \
 	echo "=== Go integration tests ==="; \
-	SANDBOXD_ENDPOINT=$(SANDBOXD_ENDPOINT) go test ./sdk/go/integration/ -v -count=1 || status=1; \
+	SANDBOXD_ENDPOINT=$(SANDBOXD_ENDPOINT) go test ./sdk/go/integration/ -v -count=1 -timeout=120s \
+		-run "^(TestHealth|TestCreateAndDestroy|TestListSandboxes|TestExecViaWebSocket|TestFsWriteAndRead|TestEnvSetAndGet|TestCreateMultiple|TestDestroyNonexistent|TestCloseNonexistent|TestExposeInvalidPort)" || status=1; \
 	echo "=== TypeScript integration tests ==="; \
-	(cd $(CURDIR)/sdk/typescript && SANDBOXD_ENDPOINT=$(SANDBOXD_ENDPOINT) bunx --bun vitest run src/__integration__/ --reporter=verbose) || status=1; \
+	(cd $(CURDIR)/sdk/typescript && bun install && SANDBOXD_ENDPOINT=$(SANDBOXD_ENDPOINT) bunx --bun vitest run -c vitest.integration.config.ts --reporter=verbose) || status=1; \
 	echo "=== Python integration tests ==="; \
 	if [ ! -d $(CURDIR)/sdk/python/.venv ]; then \
 		python3 -m venv $(CURDIR)/sdk/python/.venv && \

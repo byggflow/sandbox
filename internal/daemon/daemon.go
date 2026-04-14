@@ -91,7 +91,7 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		Events:          NewEventBus(0),
 		Tunnels:         NewTunnelManager(cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
 		AuthLimit:       newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
-		CreateLimit:     newRateLimiter(20, 1*time.Minute, cfg.Limits.RateLimitEntries),
+		CreateLimit:     newRateLimiter(cfg.Limits.CreateRateLimit, 1*time.Minute, cfg.Limits.RateLimitEntries),
 		Log:             log,
 		ctx:             ctx,
 		cancel:          cancel,

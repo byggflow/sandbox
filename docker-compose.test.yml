@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: images/base/Dockerfile
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
     entrypoint: ["echo", "base image built"]
     restart: "no"
 
@@ -13,8 +15,13 @@ services:
     build:
       context: .
       dockerfile: images/sandboxd/Dockerfile
+      args:
+        TARGETARCH: ${TARGETARCH:-amd64}
     command: ["--config", "/etc/sandboxd/config.toml"]
-    network_mode: host
+    ports:
+      - "7522:7522"
+    networks:
+      - sandboxd-test-net
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandboxd-socket:/var/run/sandboxd
@@ -28,6 +35,18 @@ services:
       timeout: 3s
       retries: 15
       start_period: 5s
+
+networks:
+  # Pre-create the bridge network with ICC enabled so sandboxd (running as a
+  # container) can reach agent containers. On Linux where sandboxd runs on the
+  # host, the daemon creates this network with ICC disabled for sandbox
+  # isolation — host-to-container traffic bypasses ICC restrictions.
+  # In Docker-in-Docker (macOS, CI), we need ICC enabled.
+  sandboxd-test-net:
+    name: sandboxd-test-net
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "true"
 
 volumes:
   sandboxd-socket:

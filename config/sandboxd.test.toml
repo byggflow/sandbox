@@ -1,5 +1,5 @@
 # sandboxd test configuration
-# Minimal settings for integration testing with small pool sizes.
+# Settings for integration testing — enough warm containers for parallel SDK tests.
 
 [server]
 socket = "/var/run/sandboxd/sandboxd.sock"
@@ -7,9 +7,10 @@ tcp = "0.0.0.0:7522"
 data_dir = "/var/lib/sandboxd"
 
 [limits]
-max_sandboxes = 10
-max_memory = "1g"
-max_cpu = 2.0
+max_sandboxes = 20
+max_memory = "2g"
+max_cpu = 4.0
+create_rate_limit = 200
 max_ttl = 3600
 max_templates = 10
 max_template_size = "512m"
@@ -19,13 +20,13 @@ template_expiry_days = 0
 bridge_name = "sandboxd-test-net"
 
 [pool]
-total_warm = 2
+total_warm = 8
 min_per_image = 0
-min_base = 1
-max_warm = 5
+min_base = 5
+max_warm = 10
 rebalance_window = "1h"
 health_interval = "10s"
-liveness_timeout = "5ms"
+liveness_timeout = "10s"
 
 [pool.base.default]
 image = "sandbox-test-base:latest"
