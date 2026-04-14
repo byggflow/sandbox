@@ -56,9 +56,10 @@ clean:
 COMPOSE_FILE := docker-compose.test.yml
 SANDBOXD_ENDPOINT := http://localhost:7522
 
-# --- Docker-compose mode (macOS / environments without native sandboxd) ---
-# Port tunneling tests are excluded because exposed ports are not reachable
-# through Docker-in-Docker on Docker Desktop.
+# --- Docker-compose mode (default, works on macOS and Linux) ---
+# Runs sandboxd in a container with Docker socket mounted.
+# The ICC isolation test is skipped because compose requires ICC=true for
+# sandboxd-to-agent communication. Native mode (below) tests ICC properly.
 
 test-integration-up: build-linux
 	TARGETARCH=$(GOARCH) docker compose -f $(COMPOSE_FILE) up --build -d
@@ -70,10 +71,9 @@ test-integration-down:
 test-integration: test-integration-up
 	@status=0; \
 	echo "=== Go integration tests ==="; \
-	SANDBOXD_ENDPOINT=$(SANDBOXD_ENDPOINT) go test ./sdk/go/integration/ -v -count=1 -timeout=120s \
-		-run "^(TestHealth|TestCreateAndDestroy|TestListSandboxes|TestExecViaWebSocket|TestFsWriteAndRead|TestEnvSetAndGet|TestCreateMultiple|TestDestroyNonexistent|TestCloseNonexistent|TestExposeInvalidPort)" || status=1; \
+	SANDBOXD_ENDPOINT=$(SANDBOXD_ENDPOINT) go test ./sdk/go/integration/ -v -count=1 -timeout=120s || status=1; \
 	echo "=== TypeScript integration tests ==="; \
-	(cd $(CURDIR)/sdk/typescript && bun install && SANDBOXD_ENDPOINT=$(SANDBOXD_ENDPOINT) bunx --bun vitest run -c vitest.integration.config.ts --reporter=verbose) || status=1; \
+	(cd $(CURDIR)/sdk/typescript && SANDBOXD_SKIP_ICC_TEST=1 bun install && SANDBOXD_ENDPOINT=$(SANDBOXD_ENDPOINT) SANDBOXD_SKIP_ICC_TEST=1 bunx --bun vitest run -c vitest.integration.config.ts --reporter=verbose) || status=1; \
 	echo "=== Python integration tests ==="; \
 	if [ ! -d $(CURDIR)/sdk/python/.venv ]; then \
 		python3 -m venv $(CURDIR)/sdk/python/.venv && \

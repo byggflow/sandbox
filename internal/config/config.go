@@ -65,6 +65,7 @@ type LimitsConfig struct {
 	RateLimitEntries        int     `toml:"rate_limit_entries"`         // Max tracked rate limit entries. Default 10000.
 	MaxTunnels              int     `toml:"max_tunnels"`               // Per-sandbox tunnel limit. Default 10.
 	MaxConnectionsPerTunnel int     `toml:"max_connections_per_tunnel"` // Concurrent TCP connections per tunnel. Default 100.
+	TunnelBindAddress       string  `toml:"tunnel_bind_address"`        // Bind address for tunnel listeners. Default "127.0.0.1".
 	TunnelPortMin           int     `toml:"tunnel_port_min"`            // Host port range start. 0 = OS assigns.
 	TunnelPortMax           int     `toml:"tunnel_port_max"`            // Host port range end. 0 = OS assigns.
 }
@@ -156,6 +157,7 @@ func Defaults() Config {
 			RateLimitEntries:        10_000,
 			MaxTunnels:              10,
 			MaxConnectionsPerTunnel: 100,
+			TunnelBindAddress:       "127.0.0.1",
 		},
 		Network: NetworkConfig{
 			BridgeName: "sandboxd-net",

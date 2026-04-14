@@ -15,6 +15,9 @@ max_ttl = 3600
 max_templates = 10
 max_template_size = "512m"
 template_expiry_days = 0
+tunnel_bind_address = "0.0.0.0"  # 0.0.0.0 so tunnel ports are reachable from host when running in Docker
+tunnel_port_min = 10000
+tunnel_port_max = 10100
 
 [network]
 bridge_name = "sandboxd-test-net"

@@ -493,6 +493,21 @@ func TestPortProxy(t *testing.T) {
 	// Wait a moment for the server to start.
 	time.Sleep(500 * time.Millisecond)
 
+	// Expose the port first (required for path-based proxy access).
+	exposeBody := bytes.NewBufferString(`{"timeout": 10}`)
+	exposeResp, err := http.Post(
+		fmt.Sprintf("%s/sandboxes/%s/ports/8080/expose", ep, info.ID),
+		"application/json",
+		exposeBody,
+	)
+	if err != nil {
+		t.Fatalf("POST expose failed: %v", err)
+	}
+	exposeResp.Body.Close()
+	if exposeResp.StatusCode != http.StatusOK {
+		t.Fatalf("expose returned %d", exposeResp.StatusCode)
+	}
+
 	// Access via path-based proxy.
 	proxyURL := fmt.Sprintf("%s/sandboxes/%s/ports/8080/", ep, info.ID)
 	resp, err := http.Get(proxyURL)

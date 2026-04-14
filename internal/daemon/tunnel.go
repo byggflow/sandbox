@@ -32,6 +32,7 @@ type TunnelInfo struct {
 
 // TunnelManager manages host-port tunnels for sandboxes.
 type TunnelManager struct {
+	bindAddr string
 	portMin  int
 	portMax  int
 	maxConns int
@@ -42,8 +43,13 @@ type TunnelManager struct {
 }
 
 // NewTunnelManager creates a tunnel manager.
-func NewTunnelManager(portMin, portMax, maxConns int, log *slog.Logger) *TunnelManager {
+// bindAddr controls which address tunnel listeners bind to (e.g. "127.0.0.1" or "0.0.0.0").
+func NewTunnelManager(bindAddr string, portMin, portMax, maxConns int, log *slog.Logger) *TunnelManager {
+	if bindAddr == "" {
+		bindAddr = "127.0.0.1"
+	}
 	return &TunnelManager{
+		bindAddr:  bindAddr,
 		portMin:   portMin,
 		portMax:   portMax,
 		maxConns:  maxConns,
@@ -139,7 +145,7 @@ func (tm *TunnelManager) waitForPort(ctx context.Context, target string, timeout
 func (tm *TunnelManager) listen() (net.Listener, error) {
 	// OS-assigned ephemeral port.
 	if tm.portMin == 0 && tm.portMax == 0 {
-		return net.Listen("tcp", "127.0.0.1:0")
+		return net.Listen("tcp", tm.bindAddr+":0")
 	}
 
 	// Sequential scan within configured range.
@@ -150,7 +156,7 @@ func (tm *TunnelManager) listen() (net.Listener, error) {
 		if tm.allocated[port] {
 			continue
 		}
-		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", tm.bindAddr, port))
 		if err != nil {
 			continue // port in use by another process
 		}

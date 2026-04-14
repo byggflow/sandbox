@@ -10,6 +10,7 @@ import { describe, test, expect, afterEach } from "vitest";
 
 const ENDPOINT = process.env.SANDBOXD_ENDPOINT ?? "";
 const skip = !ENDPOINT;
+const skipICC = !!process.env.SANDBOXD_SKIP_ICC_TEST;
 
 function wsUrl(httpUrl: string): string {
   return httpUrl.replace(/^http/, "ws");
@@ -421,7 +422,7 @@ describe.skipIf(skip)("security: cross-sandbox isolation", () => {
     }
   });
 
-  test("inter-container communication is disabled", async () => {
+  test.skipIf(skipICC)("inter-container communication is disabled", async () => {
     const sbx1 = await tracked();
     const sbx2 = await tracked();
 

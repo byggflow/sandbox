@@ -20,6 +20,7 @@ services:
     command: ["--config", "/etc/sandboxd/config.toml"]
     ports:
       - "7522:7522"
+      - "10000-10100:10000-10100"  # tunnel port range for exposed sandbox ports
     networks:
       - sandboxd-test-net
     volumes:

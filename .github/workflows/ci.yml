@@ -117,4 +117,4 @@ jobs:
         run: pip install -e "sdk/python[dev]"
 
       - name: Run integration tests
-        run: make test-integration-native
+        run: make test-integration

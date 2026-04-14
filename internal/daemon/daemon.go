@@ -89,7 +89,7 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		TemplateBackends: templateBackends,
 		Metrics:          NewMetrics(),
 		Events:          NewEventBus(0),
-		Tunnels:         NewTunnelManager(cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
+		Tunnels:         NewTunnelManager(cfg.Limits.TunnelBindAddress, cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
 		AuthLimit:       newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
 		CreateLimit:     newRateLimiter(cfg.Limits.CreateRateLimit, 1*time.Minute, cfg.Limits.RateLimitEntries),
 		Log:             log,
