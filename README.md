@@ -431,7 +431,7 @@ Key config sections:
 |---|---|
 | `server` | `socket`, `tcp`, `tls_cert`, `tls_key`, `data_dir`, `node_id` |
 | `multi_tenant` | `enabled`, `public_keys` (Ed25519, supports rotation) |
-| `limits` | `max_sandboxes`, `max_memory`, `max_cpu`, `max_ttl`, `max_templates`, `max_template_size`, `template_expiry_days`, `rate_limit_entries`, `max_tunnels`, `max_connections_per_tunnel`, `tunnel_port_min`, `tunnel_port_max` |
+| `limits` | `max_sandboxes`, `max_memory`, `max_cpu`, `max_ttl`, `max_templates`, `max_template_size`, `template_expiry_days`, `create_rate_limit`, `rate_limit_entries`, `max_tunnels`, `max_connections_per_tunnel`, `tunnel_port_min`, `tunnel_port_max` |
 | `network` | `bridge_name` |
 | `pool` | `total_warm`, `min_per_image`, `min_base`, `max_warm`, `rebalance_window`, `health_interval`, `liveness_timeout` |
 | `pool.base.<name>` | `image`, `memory`, `cpu`, `storage`, `runtime` (`docker`, `docker+gvisor`, or `firecracker`) |
