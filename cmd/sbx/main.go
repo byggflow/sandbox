@@ -14,6 +14,14 @@ func main() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
+	// Non-blocking update nudge for regular commands.
+	switch cmd {
+	case "update", "version", "help", "--help", "-h":
+		// Don't nudge during update/version/help.
+	default:
+		maybeCheckUpdate()
+	}
+
 	switch cmd {
 	case "build":
 		os.Exit(runBuild(args))
@@ -89,6 +97,8 @@ func main() {
 		os.Exit(runStats(args))
 	case "health":
 		os.Exit(runHealth(args))
+	case "update":
+		os.Exit(runUpdate(args))
 	case "version":
 		os.Exit(runVersion(args))
 	case "help", "--help", "-h":
