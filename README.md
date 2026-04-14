@@ -75,24 +75,36 @@ This produces three binaries in `bin/`: `sandboxd` (daemon), `sbx` (CLI), and `s
 
 ### Run the daemon
 
+The fastest way to start sandboxd (requires Docker):
+
+```bash
+docker run -d --name sandboxd \
+  -p 7522:7522 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e SANDBOX_TCP=0.0.0.0:7522 \
+  byggflow/sandboxd
+```
+
+Or if you installed the binary directly:
+
 ```bash
 sandboxd --config /etc/sandboxd/config.toml
 ```
 
-Or with Docker (recommended for production):
+For production, use Docker Compose:
 
 ```yaml
 services:
   sandboxd:
     image: byggflow/sandboxd
+    ports:
+      - "7522:7522"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandboxd-sock:/var/run/sandboxd
       - sandboxd-data:/var/lib/sandboxd
     environment:
       - SANDBOX_SOCKET=/var/run/sandboxd/sandboxd.sock
-      # TCP is needed inside Docker for host connectivity; safe here because
-      # Docker's network namespace isolates it from the host network.
       - SANDBOX_TCP=0.0.0.0:7522
 
 volumes:
