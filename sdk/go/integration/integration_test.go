@@ -481,11 +481,12 @@ func TestPortProxy(t *testing.T) {
 	ws := connectWS(t, ep, info.ID)
 	defer ws.Close(websocket.StatusNormalClosure, "done")
 
-	// Start an HTTP server inside the sandbox on port 8080.
+	// Start a persistent HTTP server inside the sandbox on port 8080.
+	// Must be persistent because expose probes the port (consuming a single-shot server).
 	// Redirect stdout/stderr to /dev/null so the agent's exec doesn't hang
 	// waiting for the backgrounded process's file descriptors to close.
 	spawnResp := sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c '(echo "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" | nc -l -p 8080) > /dev/null 2>&1 &'`,
+		"command": `sh -c '(while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" | nc -l -p 8080; done) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 	if spawnResp.Error != nil {
