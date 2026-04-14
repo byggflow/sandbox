@@ -24,6 +24,7 @@
     "test": "bunx --bun vitest run",
     "test:node": "npx vitest run",
     "test:deno": "deno test --no-check -A src/compat/deno_test.ts",
+    "test:integration": "bunx --bun vitest run -c vitest.integration.config.ts",
     "test:all": "bun run test && bun run test:node && bun run test:deno"
   },
   "devDependencies": {
