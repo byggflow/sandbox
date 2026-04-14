@@ -32,6 +32,16 @@ See `conventions/` for the full conventions with examples in both TypeScript and
 - **`conventions/QUALITY.md`** -API design: verb+noun entry points, category objects, single call backbone, no global state, fail-early errors.
 - **`conventions/PERFORMANCE.md`** -Performance: data structure selection, bounded collections, early exits, signal over polling, hot-path allocations, batching, coordination.
 
+## Documentation
+
+When making code changes, always check and update related documentation. Key docs:
+
+- `README.md` -- top-level feature descriptions, security section, API reference
+- `sdk/typescript/README.md` -- TypeScript SDK usage, features, examples
+- `SECURITY.md` -- security design overview
+
+Before finishing a PR, verify that any feature or behavior described in these files still matches the code. If a change adds, removes, or modifies a feature, update the relevant docs in the same PR.
+
 ## Repository structure
 
 This is a monorepo with Go and TypeScript code:
