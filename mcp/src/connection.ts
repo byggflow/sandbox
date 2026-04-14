@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { accessSync, constants, realpathSync } from "node:fs";
+import { accessSync, constants, realpathSync, existsSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +11,7 @@ import {
 } from "@byggflow/sandbox";
 
 const DEFAULT_HTTP = "http://localhost:7522";
+const DEFAULT_SOCKET = "/var/run/sandboxd/sandboxd.sock";
 
 const DOCKER_CONTAINER = "sandboxd";
 const DOCKER_IMAGE = process.env.SANDBOXD_IMAGE ?? "byggflow/sandboxd";
@@ -19,6 +21,7 @@ interface DaemonConnection {
   httpBase: string;
   auth: string | undefined;
   encrypted: boolean;
+  socketPath?: string;
 }
 
 let daemon: DaemonConnection | null = null;
@@ -35,6 +38,48 @@ export async function resolveHeaders(auth: string | undefined): Promise<Record<s
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** HTTP request over a Unix domain socket, returning a standard Response. */
+function socketFetch(
+  socketPath: string,
+  path: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: string },
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { socketPath, path, method: init?.method ?? "GET", headers: init?.headers },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf-8");
+          const status = res.statusCode ?? 0;
+          const headers: Record<string, string> = {};
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (value) headers[key] = Array.isArray(value) ? value.join(", ") : value;
+          }
+          resolve(new Response(body, { status, headers }));
+        });
+        res.on("error", reject);
+      },
+    );
+    req.on("error", reject);
+    if (init?.body) req.write(init.body);
+    req.end();
+  });
+}
+
+/** Fetch routed through Unix socket when the daemon is socket-connected, otherwise global fetch. */
+function daemonFetch(
+  path: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: string },
+): Promise<Response> {
+  if (!daemon) throw new McpError("not_connected", "Daemon not connected", "Call ensureDaemon() first");
+  if (daemon.socketPath) {
+    return socketFetch(daemon.socketPath, path, init);
+  }
+  return fetch(`${daemon.httpBase}${path}`, init);
+}
 
 /** Run a command and return { code, stdout, stderr }. */
 function spawn(
@@ -262,6 +307,21 @@ export class McpError extends Error {
 
 // ── Public API ───────────────────────────────────────────────────
 
+/** Health-check the daemon over a Unix socket. */
+function socketHealthCheck(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = httpRequest(
+      { socketPath, path: "/health", method: "GET" },
+      (res) => {
+        res.resume(); // Drain the response.
+        resolve(res.statusCode === 200);
+      },
+    );
+    req.on("error", () => resolve(false));
+    req.end();
+  });
+}
+
 /** Ensure the daemon connection is established. Called lazily on first tool call. */
 export async function ensureDaemon(): Promise<DaemonConnection> {
   if (daemon) return daemon;
@@ -291,7 +351,15 @@ export async function ensureDaemon(): Promise<DaemonConnection> {
     return daemon;
   }
 
-  // Local mode — check if already running
+  // Local mode — try Unix socket first (secure, no TCP needed)
+  const socketPath = process.env.SANDBOX_SOCKET ?? DEFAULT_SOCKET;
+  if (existsSync(socketPath) && await socketHealthCheck(socketPath)) {
+    const unixEndpoint = `unix://${socketPath}`;
+    daemon = { endpoint: unixEndpoint, httpBase: "http://localhost", auth: undefined, encrypted: false, socketPath };
+    return daemon;
+  }
+
+  // Fall back to TCP if it happens to be running
   try {
     const resp = await fetch(`${DEFAULT_HTTP}/health`);
     if (resp.ok) {
@@ -299,10 +367,10 @@ export async function ensureDaemon(): Promise<DaemonConnection> {
       return daemon;
     }
   } catch {
-    // Not running, need to start
+    // Not running on TCP either
   }
 
-  // Start daemon in Docker
+  // Start daemon in Docker (uses TCP, isolated in container)
   if (await isContainerRunning()) {
     console.error(`[sandbox-mcp] Existing ${DOCKER_CONTAINER} container is unhealthy, removing...`);
     await spawn(docker(), ["rm", "-f", DOCKER_CONTAINER], { stdout: "ignore", stderr: "ignore" });
@@ -319,6 +387,11 @@ export async function ensureDaemon(): Promise<DaemonConnection> {
   await startDockerDaemon();
   daemon = { endpoint: DEFAULT_HTTP, httpBase: DEFAULT_HTTP, auth: undefined, encrypted: false };
   return daemon;
+}
+
+/** Reset the cached daemon connection, forcing re-discovery on the next call. */
+export function resetDaemon(): void {
+  daemon = null;
 }
 
 /** Create a sandbox and track it. */
@@ -358,7 +431,7 @@ export function untrackSandbox(id: string): void {
 export async function listSandboxes(status?: string): Promise<unknown[]> {
   const conn = await ensureDaemon();
   const params = status && status !== "all" ? `?status=${status}` : "";
-  const resp = await fetch(`${conn.httpBase}/sandboxes${params}`, {
+  const resp = await daemonFetch(`/sandboxes${params}`, {
     headers: await resolveHeaders(conn.auth),
   });
   if (!resp.ok) {
@@ -371,7 +444,7 @@ export async function listSandboxes(status?: string): Promise<unknown[]> {
 /** List templates via the daemon HTTP API. */
 export async function listTemplates(): Promise<unknown[]> {
   const conn = await ensureDaemon();
-  const resp = await fetch(`${conn.httpBase}/templates`, {
+  const resp = await daemonFetch(`/templates`, {
     headers: await resolveHeaders(conn.auth),
   });
   if (!resp.ok) {
@@ -384,7 +457,7 @@ export async function listTemplates(): Promise<unknown[]> {
 /** List profiles via the daemon HTTP API. */
 export async function listProfiles(): Promise<unknown[]> {
   const conn = await ensureDaemon();
-  const resp = await fetch(`${conn.httpBase}/profiles`, {
+  const resp = await daemonFetch(`/profiles`, {
     headers: await resolveHeaders(conn.auth),
   });
   if (!resp.ok) {
@@ -397,7 +470,7 @@ export async function listProfiles(): Promise<unknown[]> {
 /** Create a template from a running sandbox. */
 export async function createTemplate(sandboxId: string, label?: string): Promise<unknown> {
   const conn = await ensureDaemon();
-  const resp = await fetch(`${conn.httpBase}/templates`, {
+  const resp = await daemonFetch(`/templates`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -420,7 +493,7 @@ export async function destroySandbox(id: string): Promise<void> {
     try { await existing.close(); } catch { /* ignore */ }
     sandboxes.delete(id);
   }
-  const resp = await fetch(`${conn.httpBase}/sandboxes/${id}`, {
+  const resp = await daemonFetch(`/sandboxes/${id}`, {
     method: "DELETE",
     headers: await resolveHeaders(conn.auth),
   });

@@ -12,6 +12,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.Server.Socket != "/var/run/sandboxd/sandboxd.sock" {
 		t.Errorf("unexpected default socket: %s", cfg.Server.Socket)
 	}
+	if cfg.Server.TCP != "" {
+		t.Errorf("unexpected default tcp: %q (TCP must be opt-in; Unix socket is the default transport)", cfg.Server.TCP)
+	}
 	if cfg.Limits.MaxSandboxes != 100 {
 		t.Errorf("unexpected default max_sandboxes: %d", cfg.Limits.MaxSandboxes)
 	}

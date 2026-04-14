@@ -91,6 +91,8 @@ services:
       - sandboxd-data:/var/lib/sandboxd
     environment:
       - SANDBOX_SOCKET=/var/run/sandboxd/sandboxd.sock
+      # TCP is needed inside Docker for host connectivity; safe here because
+      # Docker's network namespace isolates it from the host network.
       - SANDBOX_TCP=0.0.0.0:7522
 
 volumes:
@@ -257,7 +259,7 @@ Add to your MCP client config (e.g. `.mcp.json`):
 }
 ```
 
-The MCP server auto-starts a `sandboxd` container via Docker if no daemon is already running. Set `SANDBOX_ENDPOINT` and `SANDBOX_AUTH` to connect to a remote instance instead.
+The MCP server connects to the daemon automatically. It tries, in order: the Unix socket at `/var/run/sandboxd/sandboxd.sock`, TCP on `localhost:7522`, and finally auto-starts a `sandboxd` Docker container as a last resort. Set `SANDBOX_ENDPOINT` and `SANDBOX_AUTH` to connect to a remote instance instead.
 
 Available tools:
 
@@ -506,7 +508,7 @@ For deployments where the operator should not see data in transit, the SDK suppo
 const sbx = await createSandbox({ encrypted: true });
 ```
 
-The SDK and guest agent perform a key exchange (X25519) on connect. All payloads are encrypted (AES-256-GCM) before leaving the client. The daemon forwards opaque blobs -- it can route requests by method name but cannot read file contents, command arguments, or environment values.
+The SDK and guest agent perform a key exchange (X25519) on connect. JSON-RPC payloads are encrypted (AES-256-GCM) before leaving the client -- the daemon can route requests by method name but cannot read command arguments, environment values, file paths, or RPC results. Binary file transfer frames (used by `fs.read`, `fs.write`, `fs.upload`, `fs.download`) are not yet covered by E2E encryption; this requires a coordinated protocol change across the SDK and guest agent codec.
 
 ## API endpoints
 
