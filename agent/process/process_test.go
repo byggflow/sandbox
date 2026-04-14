@@ -204,7 +204,7 @@ func TestSpawnAndExit(t *testing.T) {
 	// the process may take longer than expected to flush output.
 	foundStdout := false
 	foundExit := false
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 
 	for time.Now().Before(deadline) && !(foundStdout && foundExit) {
 		time.Sleep(100 * time.Millisecond)

@@ -579,17 +579,22 @@ func TestExposeAndClosePort(t *testing.T) {
 		t.Fatalf("expected non-empty URL")
 	}
 
-	// Wait for nc to restart after the expose probe consumed one iteration.
-	time.Sleep(500 * time.Millisecond)
-
-	// Access via the exposed host port.
-	tunnelResp, err := http.Get(tunnel.URL)
-	if err != nil {
-		t.Fatalf("GET tunnel URL failed: %v", err)
+	// Retry the GET: the expose probe consumed one nc iteration, and nc
+	// needs a moment to restart in the while loop.
+	var tunnelBody []byte
+	for attempt := 0; attempt < 10; attempt++ {
+		resp, err := http.Get(tunnel.URL)
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		tunnelBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(tunnelBody) == "ok" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	defer tunnelResp.Body.Close()
-
-	tunnelBody, _ := io.ReadAll(tunnelResp.Body)
 	if string(tunnelBody) != "ok" {
 		t.Fatalf("expected body=%q via tunnel, got %q", "ok", string(tunnelBody))
 	}
