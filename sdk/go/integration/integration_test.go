@@ -482,8 +482,10 @@ func TestPortProxy(t *testing.T) {
 	defer ws.Close(websocket.StatusNormalClosure, "done")
 
 	// Start an HTTP server inside the sandbox on port 8080.
+	// Redirect stdout/stderr to /dev/null so the agent's exec doesn't hang
+	// waiting for the backgrounded process's file descriptors to close.
 	spawnResp := sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c 'echo "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" | nc -l -p 8080 &'`,
+		"command": `sh -c '(echo "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" | nc -l -p 8080) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 	if spawnResp.Error != nil {
@@ -533,7 +535,7 @@ func TestExposeAndClosePort(t *testing.T) {
 
 	// Start a persistent HTTP server inside the sandbox on port 9090.
 	spawnResp := sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 9090; done &'`,
+		"command": `sh -c '(while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 9090; done) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 	if spawnResp.Error != nil {
@@ -647,7 +649,7 @@ func TestExposeDuplicatePort(t *testing.T) {
 
 	// Start a server on port 7777.
 	sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 7777; done &'`,
+		"command": `sh -c '(while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 7777; done) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 
@@ -731,7 +733,7 @@ func TestPortsCleanedOnDestroy(t *testing.T) {
 
 	// Start a server and expose it.
 	sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 5555; done &'`,
+		"command": `sh -c '(while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 5555; done) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 
