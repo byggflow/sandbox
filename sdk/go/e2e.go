@@ -139,8 +139,14 @@ func (t *encryptedTransport) CallExpectBinary(ctx context.Context, method string
 		return nil, nil, err
 	}
 	// Decrypt each binary buffer independently.
+	// Empty buffers pass through unencrypted (the agent's CryptoConn skips
+	// encryption for 0-length frames).
 	decryptedBufs := make([][]byte, len(bufs))
 	for i, buf := range bufs {
+		if len(buf) == 0 {
+			decryptedBufs[i] = buf
+			continue
+		}
 		dec, err := t.session.Open(buf)
 		if err != nil {
 			return nil, nil, fmt.Errorf("e2e decrypt binary chunk %d: %w", i, err)
