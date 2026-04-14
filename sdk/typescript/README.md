@@ -86,7 +86,7 @@ const list = await mgr.list();
 const sbx = await createSandbox({ encrypted: true });
 ```
 
-The SDK and guest agent perform a key exchange (X25519). JSON-RPC payloads are encrypted (AES-256-GCM) before leaving the client, covering command arguments, environment values, file paths, and RPC results. Binary file transfer frames (used by `fs.read`, `fs.write`, `fs.upload`, `fs.download`) are not yet encrypted and are forwarded in cleartext by the daemon.
+The SDK and guest agent perform a key exchange (X25519). All payloads are encrypted (AES-256-GCM) before leaving the client, covering command arguments, environment values, file paths, RPC results, and file contents. Binary file transfer frames (used by `fs.read`, `fs.write`, `fs.upload`, `fs.download`) are each independently encrypted with a unique nonce.
 
 ## Sandbox capabilities
 

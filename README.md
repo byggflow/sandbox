@@ -510,7 +510,7 @@ For deployments where the operator should not see data in transit, the SDK suppo
 const sbx = await createSandbox({ encrypted: true });
 ```
 
-The SDK and guest agent perform a key exchange (X25519) on connect. JSON-RPC payloads are encrypted (AES-256-GCM) before leaving the client -- the daemon can route requests by method name but cannot read command arguments, environment values, file paths, or RPC results. Binary file transfer frames (used by `fs.read`, `fs.write`, `fs.upload`, `fs.download`) are not yet covered by E2E encryption; this requires a coordinated protocol change across the SDK and guest agent codec.
+The SDK and guest agent perform a key exchange (X25519) on connect. All payloads are encrypted (AES-256-GCM) before leaving the client -- the daemon can route requests by method name but cannot read command arguments, environment values, file paths, RPC results, or file contents. This covers both JSON-RPC params/results and binary file transfer frames (used by `fs.read`, `fs.write`, `fs.upload`, `fs.download`). Each binary frame is independently encrypted with a unique nonce.
 
 ## API endpoints
 
