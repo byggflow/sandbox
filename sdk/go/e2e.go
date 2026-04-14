@@ -9,6 +9,13 @@ import (
 	"github.com/byggflow/sandbox/protocol/crypto"
 )
 
+// gcmOverhead is the AES-256-GCM overhead per encrypted chunk: 12-byte nonce + 16-byte tag.
+const gcmOverhead = 28
+
+// plainChunkSize is the max plaintext per chunk so that encrypted output fits in
+// the transport's 1MB frame boundary (chunkSize - gcmOverhead).
+const plainChunkSize = 1024*1024 - gcmOverhead
+
 // negotiateE2E performs the X25519 key exchange with the agent and returns
 // a crypto session for encrypting/decrypting payloads.
 func negotiateE2E(ctx context.Context, transport RpcTransport) (*crypto.Session, error) {
@@ -79,11 +86,39 @@ func (t *encryptedTransport) Call(ctx context.Context, method string, params int
 }
 
 func (t *encryptedTransport) CallWithBinary(ctx context.Context, method string, params interface{}, data []byte) (interface{}, error) {
-	encrypted, err := t.encryptParams(params)
+	// Encrypt each plaintext chunk independently so encrypted chunks align
+	// with the transport's 1MB frame boundaries.
+	var encrypted []byte
+	chunks := 0
+	for offset := 0; offset < len(data); offset += plainChunkSize {
+		end := offset + plainChunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		enc, err := t.session.Seal(data[offset:end])
+		if err != nil {
+			return nil, fmt.Errorf("e2e encrypt binary chunk: %w", err)
+		}
+		encrypted = append(encrypted, enc...)
+		chunks++
+	}
+	if chunks == 0 {
+		enc, err := t.session.Seal(data)
+		if err != nil {
+			return nil, fmt.Errorf("e2e encrypt binary: %w", err)
+		}
+		encrypted = enc
+		chunks = 1
+	}
+
+	// Adjust params to reflect encrypted chunk count.
+	adjustedParams := adjustBinaryParams(params, chunks)
+
+	encParams, err := t.encryptParams(adjustedParams)
 	if err != nil {
 		return nil, fmt.Errorf("e2e encrypt params: %w", err)
 	}
-	result, err := t.inner.CallWithBinary(ctx, method, encrypted, data)
+	result, err := t.inner.CallWithBinary(ctx, method, encParams, encrypted)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +135,19 @@ func (t *encryptedTransport) CallExpectBinary(ctx context.Context, method string
 		return nil, bufs, err
 	}
 	decrypted, err := t.decryptResult(result)
-	return decrypted, bufs, err
+	if err != nil {
+		return nil, nil, err
+	}
+	// Decrypt each binary buffer independently.
+	decryptedBufs := make([][]byte, len(bufs))
+	for i, buf := range bufs {
+		dec, err := t.session.Open(buf)
+		if err != nil {
+			return nil, nil, fmt.Errorf("e2e decrypt binary chunk %d: %w", i, err)
+		}
+		decryptedBufs[i] = dec
+	}
+	return decrypted, decryptedBufs, nil
 }
 
 func (t *encryptedTransport) SendBinary(ctx context.Context, data []byte) error {
@@ -164,4 +211,22 @@ func (t *encryptedTransport) decryptResult(result interface{}) (interface{}, err
 		return nil, fmt.Errorf("unmarshal decrypted result: %w", err)
 	}
 	return decoded, nil
+}
+
+// adjustBinaryParams updates chunking metadata to match the encrypted chunk count
+// while preserving the original data size.
+func adjustBinaryParams(params interface{}, chunks int) interface{} {
+	m, ok := params.(map[string]interface{})
+	if !ok {
+		return params
+	}
+	adjusted := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		adjusted[k] = v
+	}
+	if chunks > 1 {
+		adjusted["chunked"] = true
+		adjusted["chunks"] = chunks
+	}
+	return adjusted
 }
