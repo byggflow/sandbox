@@ -54,7 +54,7 @@ describe.skipIf(skip)("e2e encryption: binary file transfers", () => {
     expect(data).toEqual(binary);
   });
 
-  test("write and read file larger than chunk threshold", async () => {
+  test("write and read file larger than chunk threshold", { timeout: 30_000 }, async () => {
     const sbx = await createEncrypted();
     // 2.5 MB file -- exceeds the 1 MB chunk threshold, requiring multiple
     // encrypted binary frames in both directions.

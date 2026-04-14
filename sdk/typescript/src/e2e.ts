@@ -1,3 +1,4 @@
+import { x25519 } from "@noble/curves/ed25519.js";
 import type { RpcTransport } from "./transport.ts";
 
 /** AES-GCM overhead: 12-byte nonce + 16-byte authentication tag. */
@@ -15,48 +16,28 @@ const PLAIN_CHUNK_SIZE = CHUNK_SIZE - GCM_OVERHEAD;
 /**
  * Negotiate E2E encryption with the agent and return an encrypted transport wrapper.
  *
- * Uses Web Crypto API (available in Bun, Node 19+, and browsers) for:
- * - X25519 ECDH key exchange
- * - AES-256-GCM payload encryption
+ * Uses @noble/curves for X25519 key exchange (works across all runtimes)
+ * and Web Crypto API for AES-256-GCM payload encryption.
  */
 export async function negotiateE2E(transport: RpcTransport): Promise<RpcTransport> {
-  // Generate X25519 keypair.
-  const clientKP = (await crypto.subtle.generateKey(
-    { name: "X25519" },
-    false,
-    ["deriveBits"],
-  )) as unknown as CryptoKeyPair;
-
-  // Export our public key.
-  const clientPubRaw = await crypto.subtle.exportKey("raw", clientKP.publicKey);
-  const clientPubB64 = btoa(String.fromCharCode(...new Uint8Array(clientPubRaw)));
+  // Generate X25519 keypair using @noble/curves.
+  const clientPriv = x25519.utils.randomSecretKey();
+  const clientPub = x25519.getPublicKey(clientPriv);
+  const clientPubB64 = btoa(String.fromCharCode(...clientPub));
 
   // Send to agent.
   const result = (await transport.call("session.negotiate_e2e", {
     public_key: clientPubB64,
   })) as { public_key: string };
 
-  // Import agent's public key.
+  // Derive shared secret via X25519 ECDH.
   const agentPubBytes = Uint8Array.from(atob(result.public_key), (c) => c.charCodeAt(0));
-  const agentPub = await crypto.subtle.importKey(
-    "raw",
-    agentPubBytes,
-    { name: "X25519" },
-    false,
-    [],
-  );
-
-  // Derive shared secret via ECDH.
-  const sharedBits = await crypto.subtle.deriveBits(
-    { name: "X25519", public: agentPub },
-    clientKP.privateKey,
-    256,
-  );
+  const sharedSecret = x25519.getSharedSecret(clientPriv, agentPubBytes);
 
   // Import as AES-GCM key.
   const aesKey = await crypto.subtle.importKey(
     "raw",
-    sharedBits,
+    sharedSecret,
     { name: "AES-GCM", length: 256 },
     false,
     ["encrypt", "decrypt"],
@@ -112,8 +93,9 @@ class EncryptedTransport implements RpcTransport {
     const { result, binary } = await this.inner.callExpectBinary(method, encrypted);
     const decrypted = await this.decryptResult(result);
     // Each binary buffer is an independently encrypted chunk.
+    // Empty buffers pass through unencrypted (agent skips encryption for 0-length frames).
     const decryptedBinary = await Promise.all(
-      binary.map((buf) => this.decryptBinary(buf)),
+      binary.map((buf) => buf.byteLength === 0 ? buf : this.decryptBinary(buf)),
     );
     return { result: decrypted, binary: decryptedBinary };
   }
