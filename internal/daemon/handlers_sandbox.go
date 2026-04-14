@@ -209,6 +209,7 @@ func (d *Daemon) handleSandboxWS(w http.ResponseWriter, r *http.Request) {
 		d.Log.Error("websocket upgrade failed", "error", err)
 		return
 	}
+	ws.SetReadLimit(2 * 1024 * 1024) // 2MB to accommodate 1MB encrypted chunks + overhead
 
 	// Check if reconnecting from disconnected state.
 	isReconnect := false

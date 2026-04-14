@@ -481,9 +481,12 @@ func TestPortProxy(t *testing.T) {
 	ws := connectWS(t, ep, info.ID)
 	defer ws.Close(websocket.StatusNormalClosure, "done")
 
-	// Start an HTTP server inside the sandbox on port 8080.
+	// Start a persistent HTTP server inside the sandbox on port 8080.
+	// Must be persistent because expose probes the port (consuming a single-shot server).
+	// Redirect stdout/stderr to /dev/null so the agent's exec doesn't hang
+	// waiting for the backgrounded process's file descriptors to close.
 	spawnResp := sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c 'echo "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" | nc -l -p 8080 &'`,
+		"command": `sh -c '(while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" | nc -l -p 8080; done) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 	if spawnResp.Error != nil {
@@ -492,6 +495,21 @@ func TestPortProxy(t *testing.T) {
 
 	// Wait a moment for the server to start.
 	time.Sleep(500 * time.Millisecond)
+
+	// Expose the port first (required for path-based proxy access).
+	exposeBody := bytes.NewBufferString(`{"timeout": 10}`)
+	exposeResp, err := http.Post(
+		fmt.Sprintf("%s/sandboxes/%s/ports/8080/expose", ep, info.ID),
+		"application/json",
+		exposeBody,
+	)
+	if err != nil {
+		t.Fatalf("POST expose failed: %v", err)
+	}
+	exposeResp.Body.Close()
+	if exposeResp.StatusCode != http.StatusOK {
+		t.Fatalf("expose returned %d", exposeResp.StatusCode)
+	}
 
 	// Access via path-based proxy.
 	proxyURL := fmt.Sprintf("%s/sandboxes/%s/ports/8080/", ep, info.ID)
@@ -518,7 +536,7 @@ func TestExposeAndClosePort(t *testing.T) {
 
 	// Start a persistent HTTP server inside the sandbox on port 9090.
 	spawnResp := sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 9090; done &'`,
+		"command": `sh -c '(while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 9090; done) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 	if spawnResp.Error != nil {
@@ -561,14 +579,22 @@ func TestExposeAndClosePort(t *testing.T) {
 		t.Fatalf("expected non-empty URL")
 	}
 
-	// Access via the exposed host port.
-	tunnelResp, err := http.Get(tunnel.URL)
-	if err != nil {
-		t.Fatalf("GET tunnel URL failed: %v", err)
+	// Retry the GET: the expose probe consumed one nc iteration, and nc
+	// needs a moment to restart in the while loop.
+	var tunnelBody []byte
+	for attempt := 0; attempt < 10; attempt++ {
+		resp, err := http.Get(tunnel.URL)
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		tunnelBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(tunnelBody) == "ok" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	defer tunnelResp.Body.Close()
-
-	tunnelBody, _ := io.ReadAll(tunnelResp.Body)
 	if string(tunnelBody) != "ok" {
 		t.Fatalf("expected body=%q via tunnel, got %q", "ok", string(tunnelBody))
 	}
@@ -632,7 +658,7 @@ func TestExposeDuplicatePort(t *testing.T) {
 
 	// Start a server on port 7777.
 	sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 7777; done &'`,
+		"command": `sh -c '(while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 7777; done) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 
@@ -716,7 +742,7 @@ func TestPortsCleanedOnDestroy(t *testing.T) {
 
 	// Start a server and expose it.
 	sendRPC(t, ws, 1, "process.exec", map[string]interface{}{
-		"command": `sh -c 'while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 5555; done &'`,
+		"command": `sh -c '(while true; do echo -e "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok" | nc -l -p 5555; done) > /dev/null 2>&1 &'`,
 		"timeout": 5,
 	})
 

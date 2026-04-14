@@ -39,6 +39,8 @@ max_ttl = 86400                   # 24 hours
 max_templates = 50
 max_template_size = "2g"
 template_expiry_days = 60         # unused templates auto-deleted, 0 = never
+create_rate_limit = 20            # max sandbox creations per identity per minute
+tunnel_bind_address = "127.0.0.1" # bind address for tunnel listeners ("0.0.0.0" when running in Docker)
 
 [network]
 bridge_name = "sandboxd-net"      # dedicated Docker bridge network

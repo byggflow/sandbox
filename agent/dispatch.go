@@ -174,7 +174,13 @@ func (d *Dispatcher) Handle(req *proto.Request, rw io.ReadWriter) {
 	d.mu.RLock()
 	if h, ok := d.conn[req.Method]; ok {
 		d.mu.RUnlock()
-		result, err = h(json.RawMessage(params), rw)
+		// Wrap the connection with a CryptoConn for binary frame encryption
+		// when E2E is active, so handlers transparently read/write plaintext.
+		var connRW io.ReadWriter = rw
+		if cs != nil {
+			connRW = codec.NewCryptoConn(rw, cs)
+		}
+		result, err = h(json.RawMessage(params), connRW)
 	} else if h, ok := d.simple[req.Method]; ok {
 		d.mu.RUnlock()
 		result, err = h(json.RawMessage(params))

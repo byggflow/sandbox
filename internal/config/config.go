@@ -61,9 +61,11 @@ type LimitsConfig struct {
 	MaxTemplates            int     `toml:"max_templates"`
 	MaxTemplateSize         string  `toml:"max_template_size"`
 	TemplateExpiryDays      int     `toml:"template_expiry_days"`
+	CreateRateLimit         int     `toml:"create_rate_limit"`          // Max sandbox creations per identity per minute. Default 20.
 	RateLimitEntries        int     `toml:"rate_limit_entries"`         // Max tracked rate limit entries. Default 10000.
 	MaxTunnels              int     `toml:"max_tunnels"`               // Per-sandbox tunnel limit. Default 10.
 	MaxConnectionsPerTunnel int     `toml:"max_connections_per_tunnel"` // Concurrent TCP connections per tunnel. Default 100.
+	TunnelBindAddress       string  `toml:"tunnel_bind_address"`        // Bind address for tunnel listeners. Default "127.0.0.1".
 	TunnelPortMin           int     `toml:"tunnel_port_min"`            // Host port range start. 0 = OS assigns.
 	TunnelPortMax           int     `toml:"tunnel_port_max"`            // Host port range end. 0 = OS assigns.
 }
@@ -151,9 +153,11 @@ func Defaults() Config {
 			MaxTemplates:            50,
 			MaxTemplateSize:         "2g",
 			TemplateExpiryDays:      60,
+			CreateRateLimit:         20,
 			RateLimitEntries:        10_000,
 			MaxTunnels:              10,
 			MaxConnectionsPerTunnel: 100,
+			TunnelBindAddress:       "127.0.0.1",
 		},
 		Network: NetworkConfig{
 			BridgeName: "sandboxd-net",

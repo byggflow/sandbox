@@ -75,24 +75,36 @@ This produces three binaries in `bin/`: `sandboxd` (daemon), `sbx` (CLI), and `s
 
 ### Run the daemon
 
+The fastest way to start sandboxd (requires Docker):
+
+```bash
+docker run -d --name sandboxd \
+  -p 7522:7522 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e SANDBOX_TCP=0.0.0.0:7522 \
+  byggflow/sandboxd
+```
+
+Or if you installed the binary directly:
+
 ```bash
 sandboxd --config /etc/sandboxd/config.toml
 ```
 
-Or with Docker (recommended for production):
+For production, use Docker Compose:
 
 ```yaml
 services:
   sandboxd:
     image: byggflow/sandboxd
+    ports:
+      - "7522:7522"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandboxd-sock:/var/run/sandboxd
       - sandboxd-data:/var/lib/sandboxd
     environment:
       - SANDBOX_SOCKET=/var/run/sandboxd/sandboxd.sock
-      # TCP is needed inside Docker for host connectivity; safe here because
-      # Docker's network namespace isolates it from the host network.
       - SANDBOX_TCP=0.0.0.0:7522
 
 volumes:
@@ -431,7 +443,7 @@ Key config sections:
 |---|---|
 | `server` | `socket`, `tcp`, `tls_cert`, `tls_key`, `data_dir`, `node_id` |
 | `multi_tenant` | `enabled`, `public_keys` (Ed25519, supports rotation) |
-| `limits` | `max_sandboxes`, `max_memory`, `max_cpu`, `max_ttl`, `max_templates`, `max_template_size`, `template_expiry_days`, `rate_limit_entries`, `max_tunnels`, `max_connections_per_tunnel`, `tunnel_port_min`, `tunnel_port_max` |
+| `limits` | `max_sandboxes`, `max_memory`, `max_cpu`, `max_ttl`, `max_templates`, `max_template_size`, `template_expiry_days`, `create_rate_limit`, `rate_limit_entries`, `max_tunnels`, `max_connections_per_tunnel`, `tunnel_bind_address`, `tunnel_port_min`, `tunnel_port_max` |
 | `network` | `bridge_name` |
 | `pool` | `total_warm`, `min_per_image`, `min_base`, `max_warm`, `rebalance_window`, `health_interval`, `liveness_timeout` |
 | `pool.base.<name>` | `image`, `memory`, `cpu`, `storage`, `runtime` (`docker`, `docker+gvisor`, or `firecracker`) |
@@ -510,7 +522,7 @@ For deployments where the operator should not see data in transit, the SDK suppo
 const sbx = await createSandbox({ encrypted: true });
 ```
 
-The SDK and guest agent perform a key exchange (X25519) on connect. JSON-RPC payloads are encrypted (AES-256-GCM) before leaving the client -- the daemon can route requests by method name but cannot read command arguments, environment values, file paths, or RPC results. Binary file transfer frames (used by `fs.read`, `fs.write`, `fs.upload`, `fs.download`) are not yet covered by E2E encryption; this requires a coordinated protocol change across the SDK and guest agent codec.
+The SDK and guest agent perform a key exchange (X25519) on connect. All payloads are encrypted (AES-256-GCM) before leaving the client -- the daemon can route requests by method name but cannot read command arguments, environment values, file paths, RPC results, or file contents. This covers both JSON-RPC params/results and binary file transfer frames (used by `fs.read`, `fs.write`, `fs.upload`, `fs.download`). Each binary frame is independently encrypted with a unique nonce.
 
 ## API endpoints
 

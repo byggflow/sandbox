@@ -10,6 +10,7 @@ import { describe, test, expect, afterEach } from "vitest";
 
 const ENDPOINT = process.env.SANDBOXD_ENDPOINT ?? "";
 const skip = !ENDPOINT;
+const skipICC = !!process.env.SANDBOXD_SKIP_ICC_TEST;
 
 function wsUrl(httpUrl: string): string {
   return httpUrl.replace(/^http/, "ws");
@@ -421,17 +422,21 @@ describe.skipIf(skip)("security: cross-sandbox isolation", () => {
     }
   });
 
-  test("inter-container communication is disabled", async () => {
+  test.skipIf(skipICC)("inter-container communication is disabled", async () => {
     const sbx1 = await tracked();
     const sbx2 = await tracked();
 
-    const result1 = await execInSandbox(sbx1.id, "hostname -I 2>/dev/null || echo UNKNOWN");
-    const ip = result1.stdout.trim().split(/\s+/)[0];
-    if (ip && ip !== "UNKNOWN") {
-      const ping = await execInSandbox(sbx2.id, `ping -c 1 -W 2 ${ip} 2>&1; echo EXIT=$?`);
-      // Ping should fail with ICC disabled
-      expect(ping.stdout).toContain("EXIT=1");
-    }
+    // Get sandbox 1's IP via ip addr (hostname -I fails on read-only rootfs).
+    const result1 = await execInSandbox(
+      sbx1.id,
+      "ip -4 addr show eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1",
+    );
+    const ip = result1.stdout.trim();
+    expect(ip).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+
+    // Ping from sandbox 2 to sandbox 1 should fail with ICC disabled.
+    const ping = await execInSandbox(sbx2.id, `ping -c 1 -W 2 ${ip} 2>&1; echo EXIT=$?`);
+    expect(ping.stdout).toContain("EXIT=1");
   });
 });
 

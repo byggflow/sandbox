@@ -11,7 +11,7 @@ import (
 )
 
 func TestTunnelManager_WaitForPort(t *testing.T) {
-	tm := NewTunnelManager(0, 0, 100, slog.Default())
+	tm := NewTunnelManager("127.0.0.1", 0, 0, 100, slog.Default())
 
 	// Start a TCP listener after a short delay.
 	ln, err := net.Listen("tcp", ":0")
@@ -29,7 +29,7 @@ func TestTunnelManager_WaitForPort(t *testing.T) {
 }
 
 func TestTunnelManager_WaitForPortTimeout(t *testing.T) {
-	tm := NewTunnelManager(0, 0, 100, slog.Default())
+	tm := NewTunnelManager("127.0.0.1", 0, 0, 100, slog.Default())
 
 	// Use a port that nothing is listening on.
 	target := "127.0.0.1:19999"
@@ -41,7 +41,7 @@ func TestTunnelManager_WaitForPortTimeout(t *testing.T) {
 }
 
 func TestTunnelManager_ListenEphemeral(t *testing.T) {
-	tm := NewTunnelManager(0, 0, 100, slog.Default())
+	tm := NewTunnelManager("127.0.0.1", 0, 0, 100, slog.Default())
 
 	ln, err := tm.listen()
 	if err != nil {
@@ -57,7 +57,7 @@ func TestTunnelManager_ListenEphemeral(t *testing.T) {
 
 func TestTunnelManager_ListenRange(t *testing.T) {
 	// Use a small range.
-	tm := NewTunnelManager(18700, 18705, 100, slog.Default())
+	tm := NewTunnelManager("127.0.0.1", 18700, 18705, 100, slog.Default())
 
 	var listeners []net.Listener
 	defer func() {
@@ -87,7 +87,7 @@ func TestTunnelManager_ListenRange(t *testing.T) {
 }
 
 func TestTunnelManager_Relay(t *testing.T) {
-	tm := NewTunnelManager(0, 0, 100, slog.Default())
+	tm := NewTunnelManager("127.0.0.1", 0, 0, 100, slog.Default())
 
 	// Start a target server that echoes data back.
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -150,7 +150,7 @@ func TestTunnelManager_Relay(t *testing.T) {
 }
 
 func TestTunnelManager_ConnectionLimit(t *testing.T) {
-	tm := NewTunnelManager(0, 0, 2, slog.Default()) // max 2 connections
+	tm := NewTunnelManager("127.0.0.1", 0, 0, 2, slog.Default()) // max 2 connections
 
 	// Start a target server.
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
