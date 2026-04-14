@@ -579,6 +579,9 @@ func TestExposeAndClosePort(t *testing.T) {
 		t.Fatalf("expected non-empty URL")
 	}
 
+	// Wait for nc to restart after the expose probe consumed one iteration.
+	time.Sleep(500 * time.Millisecond)
+
 	// Access via the exposed host port.
 	tunnelResp, err := http.Get(tunnel.URL)
 	if err != nil {
