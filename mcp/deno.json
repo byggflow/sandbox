@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "@byggflow/sandbox": "../sdk/typescript/dist/index.js"
+  }
+}

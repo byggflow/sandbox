@@ -22,7 +22,8 @@
  * ```
  */
 
-export { createSandbox, connectSandbox, DEFAULT_ENDPOINT } from "./sandbox.ts";
+export { createSandbox, connectSandbox, DEFAULT_ENDPOINT, resolveEndpoints } from "./sandbox.ts";
+export type { ResolvedEndpoint } from "./sandbox.ts";
 export { templates } from "./template.ts";
 export { WsTransport } from "./transport.ts";
 export type { RpcTransport } from "./transport.ts";

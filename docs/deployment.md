@@ -65,7 +65,8 @@ Minimal configuration:
 ```toml
 [server]
 socket = "/var/run/sandboxd/sandboxd.sock"
-tcp = "0.0.0.0:7522"
+# tcp is disabled by default. Uncomment to enable TCP access (e.g. for Docker mode):
+# tcp = "127.0.0.1:7522"
 
 [limits]
 max_sandboxes = 100
@@ -176,10 +177,12 @@ For direct TCP exposure (without a reverse proxy):
 
 ```toml
 [server]
-tcp = "0.0.0.0:7522"
+tcp = "0.0.0.0:7522"  # binds all interfaces -- use 127.0.0.1 for local-only access
 tls_cert = "/etc/sandboxd/tls/cert.pem"
 tls_key = "/etc/sandboxd/tls/key.pem"
 ```
+
+TLS is strongly recommended when binding to non-loopback addresses. Without TLS, API traffic (including auth tokens) is sent in cleartext.
 
 ## Firewall
 

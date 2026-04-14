@@ -200,39 +200,42 @@ func TestSpawnAndExit(t *testing.T) {
 		t.Errorf("pid = %d, want > 0", pid)
 	}
 
-	// Wait for process to finish (generous for CI with -race).
-	time.Sleep(2 * time.Second)
-
-	// Read notifications from conn
-	data := conn.Bytes()
-	buf := bytes.NewBuffer(data)
-
+	// Poll for notifications instead of a fixed sleep. Under -race on CI
+	// the process may take longer than expected to flush output.
 	foundStdout := false
 	foundExit := false
+	deadline := time.Now().Add(10 * time.Second)
 
-	for buf.Len() > 0 {
-		frame, err := codec.ReadFrame(buf)
-		if err != nil {
-			break
-		}
-		if frame.Type != proto.FrameJSON {
-			continue
-		}
+	for time.Now().Before(deadline) && !(foundStdout && foundExit) {
+		time.Sleep(100 * time.Millisecond)
 
-		var notif proto.Notification
-		json.Unmarshal(frame.Payload, &notif)
+		data := conn.Bytes()
+		buf := bytes.NewBuffer(data)
 
-		switch notif.Method {
-		case "process.stdout":
-			params := notif.Params.(map[string]interface{})
-			decoded, _ := base64.StdEncoding.DecodeString(params["data"].(string))
-			if string(decoded) == "spawned\n" {
-				foundStdout = true
+		for buf.Len() > 0 {
+			frame, err := codec.ReadFrame(buf)
+			if err != nil {
+				break
 			}
-		case "process.exit":
-			params := notif.Params.(map[string]interface{})
-			if int(params["exit_code"].(float64)) == 0 {
-				foundExit = true
+			if frame.Type != proto.FrameJSON {
+				continue
+			}
+
+			var notif proto.Notification
+			json.Unmarshal(frame.Payload, &notif)
+
+			switch notif.Method {
+			case "process.stdout":
+				params := notif.Params.(map[string]interface{})
+				decoded, _ := base64.StdEncoding.DecodeString(params["data"].(string))
+				if string(decoded) == "spawned\n" {
+					foundStdout = true
+				}
+			case "process.exit":
+				params := notif.Params.(map[string]interface{})
+				if int(params["exit_code"].(float64)) == 0 {
+					foundExit = true
+				}
 			}
 		}
 	}

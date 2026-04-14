@@ -118,14 +118,28 @@ export interface Sandbox {
   close(): Promise<void>;
 }
 
-/** Resolve HTTP and WS endpoint URLs from the raw endpoint string. */
-function resolveEndpoints(endpoint: string): { http: string; ws: string } {
+/** Parsed endpoint with transport details. */
+export interface ResolvedEndpoint {
+  /** HTTP base URL for REST calls. */
+  http: string;
+  /** WebSocket base URL for RPC. */
+  ws: string;
+  /** Unix socket path, set when endpoint is unix://. */
+  socketPath?: string;
+}
+
+/** Resolve endpoint URLs from the raw endpoint string.
+ *
+ * For unix:// endpoints, returns the socket path so callers can use
+ * node:http with socketPath instead of requiring TCP.
+ */
+export function resolveEndpoints(endpoint: string): ResolvedEndpoint {
   if (endpoint.startsWith("unix://")) {
-    // For Unix sockets, we rely on the caller to configure a proxy or use
-    // a local HTTP endpoint. Default to localhost for the HTTP API.
+    const socketPath = endpoint.slice("unix://".length);
     return {
-      http: "http://localhost:7522",
-      ws: "ws://localhost:7522",
+      http: "http://localhost",
+      ws: "ws://localhost",
+      socketPath,
     };
   }
 
@@ -134,10 +148,13 @@ function resolveEndpoints(endpoint: string): { http: string; ws: string } {
   return { http: httpBase, ws: wsBase };
 }
 
+/** A fetch-like function scoped to the daemon endpoint. Path-only (e.g. "/sandboxes"). */
+type DaemonFetch = (path: string, init?: RequestInit) => Promise<Response>;
+
 /** Build a Sandbox object from a connected transport. */
-function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, authHeaders?: Record<string, string>): Sandbox {
+function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFetch, httpBase: string, authHeaders?: Record<string, string>): Sandbox {
   const ctx: CallContext = { transport, sandboxId: id };
-  const base = httpBase ?? "http://localhost:7522";
+  const base = httpBase;
 
   return {
     id,
@@ -365,7 +382,7 @@ function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, au
       async expose(port: number, opts?: { timeout?: number }): Promise<TunnelInfo> {
         const body: Record<string, unknown> = {};
         if (opts?.timeout) body.timeout = opts.timeout;
-        const resp = await fetch(`${base}/sandboxes/${id}/ports/${port}/expose`, {
+        const resp = await daemonFetch(`/sandboxes/${id}/ports/${port}/expose`, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders },
           body: JSON.stringify(body),
@@ -378,7 +395,7 @@ function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, au
       },
 
       async close(port: number): Promise<void> {
-        const resp = await fetch(`${base}/sandboxes/${id}/ports/${port}/expose`, {
+        const resp = await daemonFetch(`/sandboxes/${id}/ports/${port}/expose`, {
           method: "DELETE",
           headers: { ...authHeaders },
         });
@@ -389,7 +406,7 @@ function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, au
       },
 
       async ports(): Promise<TunnelInfo[]> {
-        const resp = await fetch(`${base}/sandboxes/${id}/ports`, {
+        const resp = await daemonFetch(`/sandboxes/${id}/ports`, {
           headers: { ...authHeaders },
         });
         if (!resp.ok) {
@@ -415,10 +432,49 @@ function buildSandbox(id: string, transport: RpcTransport, httpBase?: string, au
   };
 }
 
+/**
+ * Create a DaemonFetch function for the given endpoint. Uses Unix socket
+ * transport when socketPath is set (dynamically imported to preserve browser
+ * compatibility), otherwise uses global fetch over TCP.
+ */
+async function makeDaemonFetch(resolved: ResolvedEndpoint): Promise<DaemonFetch> {
+  if (resolved.socketPath) {
+    const { unixFetch } = await import("./unix.ts");
+    const sp = resolved.socketPath;
+    return (path: string, init?: RequestInit) =>
+      unixFetch(sp, path, {
+        method: init?.method,
+        headers: init?.headers as Record<string, string> | undefined,
+        body: init?.body as string | undefined,
+      });
+  }
+  const base = resolved.http;
+  return (path: string, init?: RequestInit) => fetch(`${base}${path}`, init);
+}
+
+/** Open a WebSocket, using Unix socket transport when socketPath is set. */
+async function wsConnect(
+  resolved: ResolvedEndpoint,
+  path: string,
+  headers?: Record<string, string>,
+): Promise<WsTransport> {
+  const wsTransport = new WsTransport();
+  if (resolved.socketPath) {
+    const { UnixWebSocket } = await import("./unix.ts");
+    const uws = new UnixWebSocket();
+    await uws.connect(resolved.socketPath, path, headers);
+    wsTransport.attach(uws as unknown as WebSocket);
+  } else {
+    await wsTransport.connect(`${resolved.ws}${path}`, headers);
+  }
+  return wsTransport;
+}
+
 /** Create a new sandbox and return a connected handle. */
 export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
-  const { http, ws } = resolveEndpoints(endpoint);
+  const resolved = resolveEndpoints(endpoint);
+  const daemonFetch = await makeDaemonFetch(resolved);
 
   // Resolve auth headers — use per-request signing if available.
   let headers: Record<string, string>;
@@ -438,7 +494,7 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   if (opts?.ttl) body.ttl = opts.ttl;
   if (opts?.labels) body.labels = opts.labels;
 
-  const response = await fetch(`${http}/sandboxes`, {
+  const response = await daemonFetch("/sandboxes", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
@@ -462,21 +518,21 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
     : headers;
 
   // Connect WebSocket.
-  const wsTransport = new WsTransport();
-  await wsTransport.connect(`${ws}/sandboxes/${sandboxId}/ws`, wsHeaders);
+  const wsTransport = await wsConnect(resolved, `/sandboxes/${sandboxId}/ws`, wsHeaders);
 
   let transport: RpcTransport = wsTransport;
   if (opts?.encrypted) {
     transport = await negotiateE2E(wsTransport);
   }
 
-  return buildSandbox(sandboxId, transport, http, headers);
+  return buildSandbox(sandboxId, transport, daemonFetch, resolved.http, headers);
 }
 
 /** Connect to an existing sandbox by ID. */
 export async function connectSandbox(id: string, opts?: ConnectOptions): Promise<Sandbox> {
   const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
-  const { ws } = resolveEndpoints(endpoint);
+  const resolved = resolveEndpoints(endpoint);
+  const daemonFetch = await makeDaemonFetch(resolved);
 
   let headers: Record<string, string>;
   if (opts?.auth && isRequestSigner(opts.auth)) {
@@ -485,14 +541,12 @@ export async function connectSandbox(id: string, opts?: ConnectOptions): Promise
     headers = await resolveAuth(opts?.auth)();
   }
 
-  const wsTransport = new WsTransport();
-  await wsTransport.connect(`${ws}/sandboxes/${id}/ws`, headers);
+  const wsTransport = await wsConnect(resolved, `/sandboxes/${id}/ws`, headers);
 
   let transport: RpcTransport = wsTransport;
   if (opts?.encrypted) {
     transport = await negotiateE2E(wsTransport);
   }
 
-  const { http: httpBase } = resolveEndpoints(endpoint);
-  return buildSandbox(id, transport, httpBase, headers);
+  return buildSandbox(id, transport, daemonFetch, resolved.http, headers);
 }

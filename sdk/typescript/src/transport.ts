@@ -51,87 +51,96 @@ export class WsTransport implements RpcTransport {
       }
 
       this.ws.binaryType = "arraybuffer";
-
       this.ws.onopen = () => resolve();
-
       this.ws.onerror = (ev) => {
         const msg = "message" in ev && typeof ev.message === "string" ? ev.message : "WebSocket error";
         reject(new ConnectionError(msg));
       };
-
-      this.ws.onclose = (ev) => {
-        // Reject all pending requests.
-        for (const [, p] of this.pending) {
-          p.reject(new ConnectionError(`WebSocket closed: ${ev.code} ${ev.reason}`));
-        }
-        this.pending.clear();
-      };
-
-      this.ws.onmessage = (ev) => {
-        if (ev.data instanceof ArrayBuffer) {
-          const data = new Uint8Array(ev.data);
-
-          // Route to the pending request expecting binary frames.
-          if (this.binaryExpectId > 0) {
-            const p = this.pending.get(this.binaryExpectId);
-            if (p && p.expectBinary) {
-              if (!p.binaryBufs) p.binaryBufs = [];
-              p.binaryBufs.push(data);
-              return;
-            }
-          }
-
-          // Fall back to the one-shot binary handler.
-          if (this.binaryHandler) {
-            const handler = this.binaryHandler;
-            this.binaryHandler = null;
-            handler(data);
-          }
-          return;
-        }
-
-        let msg: { id?: number; method?: string; params?: unknown; result?: unknown; error?: { code: number; message: string } };
-        try {
-          msg = JSON.parse(ev.data as string);
-        } catch {
-          return;
-        }
-
-        // JSON-RPC response (has id).
-        if (msg.id !== undefined) {
-          const p = this.pending.get(msg.id);
-          if (!p) return;
-          this.pending.delete(msg.id);
-
-          // Clear binary expect tracking if this was the binary-expecting request.
-          if (this.binaryExpectId === msg.id) {
-            this.binaryExpectId = 0;
-          }
-
-          if (msg.error) {
-            p.reject(new RpcError(msg.error.message, msg.error.code));
-          } else {
-            p.resolve(msg.result);
-          }
-          return;
-        }
-
-        // JSON-RPC notification (no id).
-        if (msg.method) {
-          if (msg.method === "session.replaced") {
-            for (const h of this.replacedHandlers) h();
-            this.ws?.close();
-            return;
-          }
-
-          for (const h of this.notificationHandlers) {
-            h(msg.method, msg.params);
-          }
-        }
-      };
+      this.wireHandlers();
     });
 
     return this.connectPromise;
+  }
+
+  /** Attach a pre-connected WebSocket (e.g. UnixWebSocket). */
+  attach(ws: WebSocket): void {
+    this.ws = ws;
+    this.wireHandlers();
+    this.connectPromise = Promise.resolve();
+  }
+
+  private wireHandlers(): void {
+    if (!this.ws) return;
+
+    this.ws.onclose = (ev) => {
+      for (const [, p] of this.pending) {
+        p.reject(new ConnectionError(`WebSocket closed: ${ev.code} ${ev.reason}`));
+      }
+      this.pending.clear();
+    };
+
+    this.ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) {
+        const data = new Uint8Array(ev.data);
+
+        // Route to the pending request expecting binary frames.
+        if (this.binaryExpectId > 0) {
+          const p = this.pending.get(this.binaryExpectId);
+          if (p && p.expectBinary) {
+            if (!p.binaryBufs) p.binaryBufs = [];
+            p.binaryBufs.push(data);
+            return;
+          }
+        }
+
+        // Fall back to the one-shot binary handler.
+        if (this.binaryHandler) {
+          const handler = this.binaryHandler;
+          this.binaryHandler = null;
+          handler(data);
+        }
+        return;
+      }
+
+      let msg: { id?: number; method?: string; params?: unknown; result?: unknown; error?: { code: number; message: string } };
+      try {
+        msg = JSON.parse(ev.data as string);
+      } catch {
+        return;
+      }
+
+      // JSON-RPC response (has id).
+      if (msg.id !== undefined) {
+        const p = this.pending.get(msg.id);
+        if (!p) return;
+        this.pending.delete(msg.id);
+
+        // Clear binary expect tracking if this was the binary-expecting request.
+        if (this.binaryExpectId === msg.id) {
+          this.binaryExpectId = 0;
+        }
+
+        if (msg.error) {
+          p.reject(new RpcError(msg.error.message, msg.error.code));
+        } else {
+          p.resolve(msg.result);
+        }
+        return;
+      }
+
+      // JSON-RPC notification (no id).
+      if (msg.method) {
+        if (msg.method === "session.replaced") {
+          for (const h of this.replacedHandlers) h();
+          this.ws?.close();
+          return;
+        }
+
+        for (const h of this.notificationHandlers) {
+          h(msg.method, msg.params);
+        }
+      }
+    };
   }
 
   call(method: string, params: unknown): Promise<unknown> {
