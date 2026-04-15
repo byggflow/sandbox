@@ -14,7 +14,7 @@ const DEFAULT_HTTP = "http://localhost:7522";
 const DEFAULT_SOCKET = "/var/run/sandboxd/sandboxd.sock";
 
 const DOCKER_CONTAINER = "sandboxd";
-const DOCKER_IMAGE = process.env.SANDBOXD_IMAGE ?? "byggflow/sandboxd";
+const DOCKER_IMAGE = process.env.SANDBOXD_IMAGE ?? "ghcr.io/byggflow/sandboxd";
 
 interface DaemonConnection {
   endpoint: string;

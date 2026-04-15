@@ -57,7 +57,7 @@ func TestDockerRuntimeContainerLifecycle(t *testing.T) {
 	// Create a simple container to verify the runtime's Docker client works.
 	resp, err := rt.Client.ContainerCreate(ctx,
 		&container.Config{
-			Image: "byggflow/sandbox-base:latest",
+			Image: "ghcr.io/byggflow/sandbox-base:latest",
 			Cmd:   []string{"sleep", "10"},
 		},
 		&container.HostConfig{
@@ -110,7 +110,7 @@ func TestDockerRuntimeOCIRuntimeField(t *testing.T) {
 	// to prove the field propagates correctly.
 	resp, err := docker.ContainerCreate(ctx,
 		&container.Config{
-			Image: "byggflow/sandbox-base:latest",
+			Image: "ghcr.io/byggflow/sandbox-base:latest",
 			Cmd:   []string{"true"},
 		},
 		&container.HostConfig{
@@ -136,7 +136,7 @@ func TestDockerRuntimeOCIRuntimeField(t *testing.T) {
 	// Also verify that an invalid runtime is rejected by Docker.
 	_, err = docker.ContainerCreate(ctx,
 		&container.Config{
-			Image: "byggflow/sandbox-base:latest",
+			Image: "ghcr.io/byggflow/sandbox-base:latest",
 			Cmd:   []string{"true"},
 		},
 		&container.HostConfig{
@@ -207,7 +207,7 @@ func TestGVisorRuntimeCreateDestroy(t *testing.T) {
 	// so we can verify the runtime field and container behavior.
 	resp, err := rt.Client.ContainerCreate(ctx,
 		&container.Config{
-			Image: "byggflow/sandbox-base:latest",
+			Image: "ghcr.io/byggflow/sandbox-base:latest",
 			Cmd:   []string{"sleep", "30"},
 		},
 		&container.HostConfig{

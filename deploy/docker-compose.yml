@@ -1,6 +1,6 @@
 services:
   sandboxd:
-    image: byggflow/sandboxd
+    image: ghcr.io/byggflow/sandboxd
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandboxd-sock:/var/run/sandboxd
