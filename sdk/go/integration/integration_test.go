@@ -512,16 +512,25 @@ func TestPortProxy(t *testing.T) {
 	}
 
 	// Access via path-based proxy.
+	// Retry: the expose probe consumed one nc iteration; nc needs a moment to
+	// restart in the while loop before the proxy GET can succeed.
 	proxyURL := fmt.Sprintf("%s/sandboxes/%s/ports/8080/", ep, info.ID)
-	resp, err := http.Get(proxyURL)
-	if err != nil {
-		t.Fatalf("GET proxy URL failed: %v", err)
+	var body []byte
+	for attempt := 0; attempt < 10; attempt++ {
+		resp, err := http.Get(proxyURL)
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) == "hello" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "hello" {
-		t.Fatalf("expected body=%q, got %q (status %d)", "hello", string(body), resp.StatusCode)
+		t.Fatalf("expected body=%q, got %q", "hello", string(body))
 	}
 }
 
@@ -757,12 +766,21 @@ func TestPortsCleanedOnDestroy(t *testing.T) {
 	json.NewDecoder(expResp.Body).Decode(&tunnel)
 	expResp.Body.Close()
 
-	// Verify we can reach it.
-	r, err := http.Get(tunnel.URL)
-	if err != nil {
-		t.Fatalf("GET tunnel URL failed: %v", err)
+	// Verify we can reach it (retry: expose probe consumed one nc iteration).
+	var reached bool
+	for attempt := 0; attempt < 10; attempt++ {
+		r, err := http.Get(tunnel.URL)
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		r.Body.Close()
+		reached = true
+		break
 	}
-	r.Body.Close()
+	if !reached {
+		t.Fatalf("tunnel URL %s never became reachable", tunnel.URL)
+	}
 
 	// Destroy the sandbox.
 	destroySandbox(t, ep, info.ID)
