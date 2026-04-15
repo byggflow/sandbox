@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -48,12 +49,18 @@ func runExec(args []string) int {
 }
 
 func runAttach(args []string) int {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: sbx attach <id>")
+	fs := flag.NewFlagSet("sbx attach", flag.ContinueOnError)
+	shell := fs.String("shell", "", "Shell to launch (e.g. /bin/bash)")
+	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 
-	id := args[0]
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "Usage: sbx attach [--shell <path>] <id>")
+		return 1
+	}
+
+	id := fs.Arg(0)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -73,8 +80,9 @@ func runAttach(args []string) int {
 
 	// Allocate PTY.
 	pty, err := sbx.Process().Pty(ctx, &sandbox.PtyOptions{
-		Cols: cols,
-		Rows: rows,
+		Command: *shell,
+		Cols:    cols,
+		Rows:    rows,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sbx attach: pty: %v\n", err)
