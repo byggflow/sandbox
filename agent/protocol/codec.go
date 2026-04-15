@@ -41,18 +41,16 @@ func ReadFrame(r io.Reader) (Frame, error) {
 }
 
 // WriteFrame writes a raw frame to w.
+// The header and payload are written in a single Write call so that
+// concurrent writers sharing the same w cannot interleave partial frames.
 func WriteFrame(w io.Writer, ftype byte, payload []byte) error {
-	header := make([]byte, 5)
-	header[0] = ftype
-	binary.BigEndian.PutUint32(header[1:5], uint32(len(payload)))
+	buf := make([]byte, 5+len(payload))
+	buf[0] = ftype
+	binary.BigEndian.PutUint32(buf[1:5], uint32(len(payload)))
+	copy(buf[5:], payload)
 
-	if _, err := w.Write(header); err != nil {
-		return fmt.Errorf("write frame header: %w", err)
-	}
-	if len(payload) > 0 {
-		if _, err := w.Write(payload); err != nil {
-			return fmt.Errorf("write frame payload: %w", err)
-		}
+	if _, err := w.Write(buf); err != nil {
+		return fmt.Errorf("write frame: %w", err)
 	}
 	return nil
 }
