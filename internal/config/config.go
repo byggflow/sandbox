@@ -172,7 +172,7 @@ func Defaults() Config {
 			LivenessTimeout: "5ms",
 			Base: map[string]BaseImageConfig{
 				"default": {
-					Image:   "byggflow/sandbox-base:latest",
+					Image:   "ghcr.io/byggflow/sandbox-base:latest",
 					Memory:  "512m",
 					CPU:     1.0,
 					Storage: "500m",

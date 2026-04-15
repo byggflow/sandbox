@@ -55,13 +55,13 @@ health_interval = "10s"           # periodic agent health check
 liveness_timeout = "5ms"          # ping timeout on warm pool assignment
 
 [pool.base.default]
-image = "byggflow/sandbox-base:latest"
+image = "ghcr.io/byggflow/sandbox-base:latest"
 memory = "512m"
 cpu = 1.0
 storage = "500m"              # tmpfs size for /root workspace
 
 [pool.base.python]
-image = "byggflow/sandbox-python:latest"
+image = "ghcr.io/byggflow/sandbox-python:latest"
 memory = "1g"
 cpu = 2.0
 storage = "1g"
@@ -72,7 +72,7 @@ storage = "1g"
 #   "firecracker"   - separate kernel in KVM microVM
 #
 # [pool.base.secure]
-# image = "byggflow/sandbox-base:latest"
+# image = "ghcr.io/byggflow/sandbox-base:latest"
 # memory = "512m"
 # cpu = 1.0
 # storage = "500m"

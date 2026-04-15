@@ -82,7 +82,7 @@ docker run -d --name sandboxd \
   -p 7522:7522 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e SANDBOX_TCP=0.0.0.0:7522 \
-  byggflow/sandboxd
+  ghcr.io/byggflow/sandboxd
 ```
 
 Or if you installed the binary directly:
@@ -96,7 +96,7 @@ For production, use Docker Compose:
 ```yaml
 services:
   sandboxd:
-    image: byggflow/sandboxd
+    image: ghcr.io/byggflow/sandboxd
     ports:
       - "7522:7522"
     volumes:
