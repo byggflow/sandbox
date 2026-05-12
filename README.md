@@ -385,7 +385,8 @@ Port tunneling is available in all SDKs via the `net` category and in the MCP se
 | Command | Description |
 |---|---|
 | `sbx exec <id> "ls -la"` | Run a command, print output |
-| `sbx attach <id>` | Interactive shell session |
+| `sbx attach <id>` | Interactive PTY session |
+| `sbx attach --shell /bin/zsh <id>` | PTY session with a specific shell |
 
 ### Filesystem
 

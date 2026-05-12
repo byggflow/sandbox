@@ -146,10 +146,9 @@ describe("MCP tools error handling (no daemon)", () => {
   let transport: StdioClientTransport;
 
   beforeEach(async () => {
-    const c = createClient();
+    const c = await connectWithRetry();
     client = c.client;
     transport = c.transport;
-    await client.connect(transport);
 
     return async () => {
       await transport.close();
