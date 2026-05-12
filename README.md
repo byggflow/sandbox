@@ -135,7 +135,8 @@ npm install @byggflow/sandbox
 ```typescript
 import { createSandbox } from "@byggflow/sandbox";
 
-// Connects to /var/run/sandboxd/sandboxd.sock by default
+// Auto-discovers the daemon: SANDBOXD_ENDPOINT env var, then the Unix socket
+// at /var/run/sandboxd/sandboxd.sock, then http://localhost:7522.
 const sbx = await createSandbox();
 
 await sbx.fs.write("/root/main.py", "print('hello')");
@@ -153,6 +154,9 @@ const sbx = await createSandbox({
   auth: "sk-abc123",
 });
 ```
+
+The same `SANDBOXD_ENDPOINT` and `SBX_AUTH` env vars work for the SDK and the
+`sbx` CLI.
 
 Streaming output as it arrives:
 
@@ -183,7 +187,8 @@ await sbx.net.close(8080);
 ```go
 import sandbox "github.com/byggflow/sandbox/sdk/go"
 
-// Connects to /var/run/sandboxd/sandboxd.sock by default
+// Auto-discovers the daemon: SANDBOXD_ENDPOINT env var, then the Unix socket
+// at /var/run/sandboxd/sandboxd.sock, then http://localhost:7522.
 sbx, err := sandbox.Create(ctx, &sandbox.Options{})
 if err != nil {
     log.Fatal(err)
@@ -353,6 +358,28 @@ The pool dynamically allocates slots based on creation frequency across profiles
 
 File reads, writes, uploads, and downloads support chunked transfer for large files (>1MB).
 
+`process.spawn` and `process.pty` are implemented in the agent and the Go SDK; the TypeScript SDK currently exposes only `exec` and `streamExec`.
+
+## Backpressure and capacity
+
+When the daemon hits its sandbox limit (`limits.max_sandboxes`), `create` calls return `429 Too Many Requests` with a `Retry-After` header. Both SDKs surface this as a typed error so callers can implement backoff:
+
+```typescript
+import { createSandbox, CapacityError } from "@byggflow/sandbox";
+
+try {
+  const sbx = await createSandbox({ profile: "python" });
+} catch (err) {
+  if (err instanceof CapacityError) {
+    console.warn(`daemon at capacity, retry in ${err.retryAfter}s`);
+  } else {
+    throw err;
+  }
+}
+```
+
+The same `CapacityError` is thrown by `net.expose` when the tunnel pool (`limits.max_tunnels`) is exhausted. The Go SDK exposes the equivalent type as `*sandbox.CapacityError` with a `RetryAfter` field.
+
 ## Port tunneling
 
 Sandboxes can expose network ports to the outside through two mechanisms:
@@ -512,6 +539,24 @@ Set `runtime = "docker+gvisor"` on a profile. Requires [runsc](https://gvisor.de
 sandboxd follows the same model as Docker: if you can reach the socket, you have access. The Unix socket is permission-controlled via file ownership (`root:sandboxd`).
 
 For multi-tenant deployments, sandboxd supports Ed25519 signature verification. A reverse proxy handles authentication (OAuth, API keys, JWTs), signs requests with Ed25519, and injects an `X-Sandbox-Identity` header. sandboxd verifies the signature and scopes all resources -- sandboxes, templates, tunnels -- to the caller's identity. Multiple public keys are supported for zero-downtime key rotation.
+
+The TypeScript SDK ships a `signatureAuth()` helper that signs each request from the client side, useful when a SaaS gateway issues short-lived per-tenant keys:
+
+```typescript
+import { createSandbox, signatureAuth } from "@byggflow/sandbox";
+
+const sbx = await createSandbox({
+  endpoint: "https://sandbox.acme.com",
+  auth: signatureAuth({
+    privateKey,           // 32- or 64-byte Uint8Array
+    identity: "user-42",  // becomes X-Sandbox-Identity
+    maxConcurrent: 5,     // optional per-request quota overrides
+    maxTTL: 3600,
+  }),
+});
+```
+
+Use a plain bearer token (`auth: "sk-…"`) for trusted callers; switch to `signatureAuth()` when individual end-user identity needs to be enforced server-side.
 
 Admin routes (pool management) are restricted to Unix socket connections only and are not accessible over TCP.
 

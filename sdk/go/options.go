@@ -1,11 +1,20 @@
 package sandbox
 
-// DefaultEndpoint is the default Unix socket path for sandboxd.
-const DefaultEndpoint = "unix:///var/run/sandboxd/sandboxd.sock"
+import "os"
+
+// DefaultSocketPath is the Unix socket path checked during auto-discovery.
+const DefaultSocketPath = "/var/run/sandboxd/sandboxd.sock"
+
+// DefaultTCPEndpoint is the TCP fallback used when the socket isn't reachable.
+const DefaultTCPEndpoint = "http://localhost:7522"
+
+// DefaultEndpoint is the default sandboxd endpoint as a string. Kept as a
+// stable constant; prefer ResolveDefaultEndpoint for runtime discovery.
+const DefaultEndpoint = "unix://" + DefaultSocketPath
 
 // Options configures sandbox creation.
 type Options struct {
-	// Endpoint is the daemon address. Defaults to DefaultEndpoint.
+	// Endpoint is the daemon address. When empty, ResolveDefaultEndpoint is used.
 	Endpoint string
 	// Auth provides credentials for the connection.
 	Auth Auth
@@ -27,7 +36,7 @@ type Options struct {
 
 // ConnectOptions configures connecting to an existing sandbox.
 type ConnectOptions struct {
-	// Endpoint is the daemon address. Defaults to DefaultEndpoint.
+	// Endpoint is the daemon address. When empty, ResolveDefaultEndpoint is used.
 	Endpoint string
 	// Auth provides credentials for the connection.
 	Auth Auth
@@ -37,9 +46,33 @@ type ConnectOptions struct {
 	Retry bool
 }
 
+// ResolveDefaultEndpoint returns the daemon endpoint that should be used when
+// the caller doesn't pass one explicitly. The order is:
+//
+//  1. SANDBOXD_ENDPOINT environment variable, if set.
+//  2. Unix socket at /var/run/sandboxd/sandboxd.sock, if it exists.
+//  3. http://localhost:7522 (TCP fallback).
+func ResolveDefaultEndpoint() string {
+	if v := os.Getenv("SANDBOXD_ENDPOINT"); v != "" {
+		return v
+	}
+	if _, err := os.Stat(DefaultSocketPath); err == nil {
+		return "unix://" + DefaultSocketPath
+	}
+	return DefaultTCPEndpoint
+}
+
+// defaultAuth returns an Auth from the SBX_AUTH environment variable, or nil.
+func defaultAuth() Auth {
+	if tok := os.Getenv("SBX_AUTH"); tok != "" {
+		return &StringAuth{Token: tok}
+	}
+	return nil
+}
+
 func resolveEndpoint(endpoint string) string {
 	if endpoint == "" {
-		return DefaultEndpoint
+		return ResolveDefaultEndpoint()
 	}
 	return endpoint
 }

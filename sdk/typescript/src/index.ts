@@ -22,12 +22,20 @@
  * ```
  */
 
-export { createSandbox, connectSandbox, DEFAULT_ENDPOINT, resolveEndpoints } from "./sandbox.ts";
+export {
+  createSandbox,
+  connectSandbox,
+  DEFAULT_ENDPOINT,
+  DEFAULT_SOCKET_PATH,
+  DEFAULT_TCP_ENDPOINT,
+  resolveDefaultEndpoint,
+  resolveEndpoints,
+} from "./sandbox.ts";
 export type { ResolvedEndpoint } from "./sandbox.ts";
 export { templates } from "./template.ts";
 export { WsTransport } from "./transport.ts";
 export type { RpcTransport } from "./transport.ts";
-export type { Sandbox, SandboxOptions, ConnectOptions, ExecResult, SpawnHandle, PtyHandle, OutputEvent, StreamExecHandle, TunnelInfo } from "./sandbox.ts";
+export type { Sandbox, SandboxOptions, ConnectOptions, ExecResult, OutputEvent, StreamExecHandle, TunnelInfo, StatResult } from "./sandbox.ts";
 export type { TemplateManager } from "./template.ts";
 export type { Auth, RequestSignerAuth, SignatureAuthOptions } from "./auth.ts";
 export { signatureAuth } from "./auth.ts";

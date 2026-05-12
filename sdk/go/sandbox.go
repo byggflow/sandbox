@@ -165,7 +165,7 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 		return nil, fmt.Errorf("sandbox: context required")
 	}
 
-	endpoint := DefaultEndpoint
+	endpoint := ResolveDefaultEndpoint()
 	if opts != nil && opts.Endpoint != "" {
 		endpoint = opts.Endpoint
 	}
@@ -173,6 +173,9 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 	var auth Auth
 	if opts != nil {
 		auth = opts.Auth
+	}
+	if auth == nil {
+		auth = defaultAuth()
 	}
 	headers, err := resolveAuthHeaders(ctx, auth, http.MethodPost, "/sandboxes")
 	if err != nil {
@@ -319,7 +322,7 @@ func Connect(ctx context.Context, id string, opts *ConnectOptions) (*Sandbox, er
 		return nil, fmt.Errorf("sandbox: id required")
 	}
 
-	endpoint := DefaultEndpoint
+	endpoint := ResolveDefaultEndpoint()
 	if opts != nil && opts.Endpoint != "" {
 		endpoint = opts.Endpoint
 	}
@@ -327,6 +330,9 @@ func Connect(ctx context.Context, id string, opts *ConnectOptions) (*Sandbox, er
 	var auth Auth
 	if opts != nil {
 		auth = opts.Auth
+	}
+	if auth == nil {
+		auth = defaultAuth()
 	}
 	headers, err := resolveAuthHeaders(ctx, auth, http.MethodGet, "/sandboxes/"+id+"/ws")
 	if err != nil {
