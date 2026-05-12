@@ -3,12 +3,60 @@ import { isRequestSigner, resolveAuth } from "./auth.ts";
 import { call } from "./call.ts";
 import type { CallContext } from "./call.ts";
 import { negotiateE2E } from "./e2e.ts";
-import { CapacityError, ConnectionError } from "./errors.ts";
+import { CapacityError, ConnectionError, RpcError } from "./errors.ts";
 import { WsTransport } from "./transport.ts";
 import type { RpcTransport } from "./transport.ts";
 
-/** Default daemon endpoint using a Unix domain socket. */
+/** Default Unix socket path checked during auto-discovery. */
+export const DEFAULT_SOCKET_PATH = "/var/run/sandboxd/sandboxd.sock";
+
+/** Default TCP endpoint used when no socket is found. */
+export const DEFAULT_TCP_ENDPOINT = "http://localhost:7522";
+
+/**
+ * Default daemon endpoint as a string. Kept for backwards compatibility with
+ * callers that want a stable constant; prefer `resolveDefaultEndpoint()` for
+ * runtime discovery (env var → socket → TCP fallback).
+ */
 export const DEFAULT_ENDPOINT = "unix:///var/run/sandboxd/sandboxd.sock";
+
+/** Read an environment variable in a cross-runtime way (Node, Bun, Deno). */
+function envVar(name: string): string | undefined {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return env?.[name];
+}
+
+/**
+ * Resolve the daemon endpoint when none is passed explicitly.
+ *
+ * Order:
+ * 1. `SANDBOXD_ENDPOINT` environment variable.
+ * 2. Unix socket at `/var/run/sandboxd/sandboxd.sock` if it exists.
+ * 3. TCP `http://localhost:7522`.
+ *
+ * Browsers and other runtimes without `process.env` or `node:fs` fall straight
+ * through to the TCP default.
+ */
+export async function resolveDefaultEndpoint(): Promise<string> {
+  const envEndpoint = envVar("SANDBOXD_ENDPOINT");
+  if (envEndpoint) return envEndpoint;
+
+  try {
+    const fs = await import("node:fs");
+    if (fs.existsSync(DEFAULT_SOCKET_PATH)) {
+      return `unix://${DEFAULT_SOCKET_PATH}`;
+    }
+  } catch {
+    // node:fs unavailable (browser, Deno without --allow-read) — fall through.
+  }
+
+  return DEFAULT_TCP_ENDPOINT;
+}
+
+/** Default auth derived from `SBX_AUTH` (bearer token), or undefined. */
+function defaultAuth(): Auth | undefined {
+  return envVar("SBX_AUTH");
+}
 
 /** Options for creating a new sandbox. */
 export interface SandboxOptions {
@@ -53,31 +101,22 @@ export interface StreamExecHandle {
   exitCode: Promise<number>;
 }
 
-/** Handle for a spawned process with streaming I/O. */
-export interface SpawnHandle {
-  stdout: AsyncIterable<Uint8Array>;
-  stderr: AsyncIterable<Uint8Array>;
-  stdin: WritableStream<Uint8Array>;
-  pid: number;
-  kill(signal?: string): Promise<void>;
-  wait(): Promise<{ exitCode: number }>;
-}
-
-/** Handle for a pseudo-terminal session. */
-export interface PtyHandle {
-  data: AsyncIterable<Uint8Array>;
-  write(data: string | Uint8Array): void;
-  resize(cols: number, rows: number): void;
-  pid: number;
-  kill(signal?: string): Promise<void>;
-  wait(): Promise<{ exitCode: number }>;
-}
-
 /** Information about an exposed port tunnel. */
 export interface TunnelInfo {
   port: number;
   host_port: number;
   url: string;
+}
+
+/** Metadata about a file or directory inside a sandbox. Matches the agent's stat response. */
+export interface StatResult {
+  name: string;
+  size: number;
+  /** Unix file mode bits. */
+  mode: number;
+  isDir: boolean;
+  /** Modification time as Unix epoch seconds. */
+  modTime: number;
 }
 
 /** A connected sandbox with filesystem, process, environment, and network access. */
@@ -87,8 +126,9 @@ export interface Sandbox {
     read(path: string): Promise<Uint8Array>;
     write(path: string, content: string | Uint8Array): Promise<void>;
     list(path: string): Promise<string[]>;
-    stat(path: string): Promise<Record<string, unknown>>;
+    stat(path: string): Promise<StatResult>;
     remove(path: string): Promise<void>;
+    rename(oldPath: string, newPath: string): Promise<void>;
     mkdir(path: string): Promise<void>;
     upload(path: string, tar: Uint8Array): Promise<void>;
     download(path: string): Promise<Uint8Array>;
@@ -96,8 +136,6 @@ export interface Sandbox {
   process: {
     exec(command: string, opts?: { env?: Record<string, string>; timeout?: number }): Promise<ExecResult>;
     streamExec(command: string, opts?: { env?: Record<string, string>; timeout?: number; cwd?: string }): StreamExecHandle;
-    spawn(command: string, opts?: { env?: Record<string, string> }): SpawnHandle;
-    pty(opts?: { command?: string; cols?: number; rows?: number; env?: Record<string, string> }): PtyHandle;
   };
   env: {
     get(key: string): Promise<string | null>;
@@ -200,13 +238,33 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
         return result as string[];
       },
 
-      async stat(path: string): Promise<Record<string, unknown>> {
-        const result = await call(ctx, { method: "fs.stat", params: { path } });
-        return result as Record<string, unknown>;
+      async stat(path: string): Promise<StatResult> {
+        // Wire format from the guest agent uses snake_case for compound fields
+        // and serialises ModTime as an RFC3339 string from Go's time.Time.
+        const result = await call(ctx, { method: "fs.stat", params: { path } }) as Record<string, unknown>;
+        const rawModTime = result.mod_time;
+        let modTime = 0;
+        if (typeof rawModTime === "number") {
+          modTime = rawModTime;
+        } else if (typeof rawModTime === "string" && rawModTime !== "") {
+          const ms = Date.parse(rawModTime);
+          if (!Number.isNaN(ms)) modTime = Math.floor(ms / 1000);
+        }
+        return {
+          name: (result.name as string) ?? "",
+          size: (result.size as number) ?? 0,
+          mode: (result.mode as number) ?? 0,
+          isDir: (result.is_dir as boolean) ?? false,
+          modTime,
+        };
       },
 
       async remove(path: string): Promise<void> {
         await call(ctx, { method: "fs.remove", params: { path } });
+      },
+
+      async rename(oldPath: string, newPath: string): Promise<void> {
+        await call(ctx, { method: "fs.rename", params: { old: oldPath, new: newPath } });
       },
 
       async mkdir(path: string): Promise<void> {
@@ -322,14 +380,6 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
 
         return { output, exitCode: exitCodePromise };
       },
-
-      spawn(_command: string, _opts?: { env?: Record<string, string> }): SpawnHandle {
-        throw new Error("process.spawn requires streaming transport support");
-      },
-
-      pty(_opts?: { command?: string; cols?: number; rows?: number; env?: Record<string, string> }): PtyHandle {
-        throw new Error("process.pty requires streaming transport support");
-      },
     },
 
     env: {
@@ -339,10 +389,19 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
       },
 
       async set(key: string, value: string): Promise<void> {
+        if (typeof key !== "string" || key === "") {
+          throw new TypeError("env.set: key must be a non-empty string");
+        }
+        if (typeof value !== "string") {
+          throw new TypeError("env.set: value must be a string");
+        }
         await call(ctx, { method: "env.set", params: { key, value } });
       },
 
       async delete(key: string): Promise<void> {
+        if (typeof key !== "string" || key === "") {
+          throw new TypeError("env.delete: key must be a non-empty string");
+        }
         await call(ctx, { method: "env.delete", params: { key } });
       },
 
@@ -388,8 +447,7 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
           body: JSON.stringify(body),
         });
         if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(`expose failed (status ${resp.status}): ${text}`);
+          throw await tunnelError(resp, `net.expose(${port})`);
         }
         return await resp.json() as TunnelInfo;
       },
@@ -400,8 +458,7 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
           headers: { ...authHeaders },
         });
         if (!resp.ok && resp.status !== 404) {
-          const text = await resp.text();
-          throw new Error(`close failed (status ${resp.status}): ${text}`);
+          throw await tunnelError(resp, `net.close(${port})`);
         }
       },
 
@@ -410,8 +467,7 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
           headers: { ...authHeaders },
         });
         if (!resp.ok) {
-          const text = await resp.text();
-          throw new Error(`ports failed (status ${resp.status}): ${text}`);
+          throw await tunnelError(resp, "net.ports");
         }
         return await resp.json() as TunnelInfo[];
       },
@@ -430,6 +486,21 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
       await transport.close();
     },
   };
+}
+
+/**
+ * Build the right error for a failed tunnel HTTP call. Preserves the daemon's
+ * response body so users see the underlying cause, and surfaces 429/503 as
+ * `CapacityError` so callers can read `retryAfter`.
+ */
+async function tunnelError(resp: Response, op: string): Promise<Error> {
+  const text = (await resp.text()).trim();
+  const detail = text || resp.statusText || "no response body";
+  if (resp.status === 429 || resp.status === 503) {
+    const retryAfter = parseInt(resp.headers.get("Retry-After") ?? "", 10);
+    return new CapacityError(`${op}: ${detail}`, Number.isNaN(retryAfter) ? 60 : retryAfter);
+  }
+  return new RpcError(`${op} failed (status ${resp.status}): ${detail}`, resp.status);
 }
 
 /**
@@ -472,17 +543,18 @@ async function wsConnect(
 
 /** Create a new sandbox and return a connected handle. */
 export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
-  const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
+  const endpoint = opts?.endpoint ?? await resolveDefaultEndpoint();
   const resolved = resolveEndpoints(endpoint);
   const daemonFetch = await makeDaemonFetch(resolved);
 
   // Resolve auth headers — use per-request signing if available.
+  const auth = opts?.auth ?? defaultAuth();
   let headers: Record<string, string>;
-  const signer = opts?.auth && isRequestSigner(opts.auth) ? opts.auth : null;
+  const signer = auth && isRequestSigner(auth) ? auth : null;
   if (signer) {
     headers = await signer.resolveForRequest("POST", "/sandboxes");
   } else {
-    headers = await resolveAuth(opts?.auth)();
+    headers = await resolveAuth(auth)();
   }
 
   // Create the sandbox via HTTP.
@@ -530,15 +602,16 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
 
 /** Connect to an existing sandbox by ID. */
 export async function connectSandbox(id: string, opts?: ConnectOptions): Promise<Sandbox> {
-  const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
+  const endpoint = opts?.endpoint ?? await resolveDefaultEndpoint();
   const resolved = resolveEndpoints(endpoint);
   const daemonFetch = await makeDaemonFetch(resolved);
 
+  const auth = opts?.auth ?? defaultAuth();
   let headers: Record<string, string>;
-  if (opts?.auth && isRequestSigner(opts.auth)) {
-    headers = await opts.auth.resolveForRequest("GET", `/sandboxes/${id}/ws`);
+  if (auth && isRequestSigner(auth)) {
+    headers = await auth.resolveForRequest("GET", `/sandboxes/${id}/ws`);
   } else {
-    headers = await resolveAuth(opts?.auth)();
+    headers = await resolveAuth(auth)();
   }
 
   const wsTransport = await wsConnect(resolved, `/sandboxes/${id}/ws`, headers);

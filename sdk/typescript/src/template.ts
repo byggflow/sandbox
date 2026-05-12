@@ -1,6 +1,6 @@
 import type { Auth } from "./auth.ts";
 import { resolveAuth } from "./auth.ts";
-import { DEFAULT_ENDPOINT, resolveEndpoints } from "./sandbox.ts";
+import { resolveDefaultEndpoint, resolveEndpoints } from "./sandbox.ts";
 import type { ResolvedEndpoint } from "./sandbox.ts";
 
 /** Client for listing, fetching, and deleting sandbox templates. */
@@ -35,10 +35,11 @@ async function makeDaemonFetch(resolved: ResolvedEndpoint): Promise<DaemonFetch>
 
 /** Create a template manager for listing, fetching, and deleting templates. */
 export function templates(opts?: TemplateOptions): TemplateManager {
-  const endpoint = opts?.endpoint ?? DEFAULT_ENDPOINT;
-  const resolved = resolveEndpoints(endpoint);
   const authResolver = resolveAuth(opts?.auth);
-  const fetchPromise = makeDaemonFetch(resolved);
+  const fetchPromise = (async (): Promise<DaemonFetch> => {
+    const endpoint = opts?.endpoint ?? await resolveDefaultEndpoint();
+    return makeDaemonFetch(resolveEndpoints(endpoint));
+  })();
 
   return {
     async list(): Promise<{ id: string; label: string }[]> {

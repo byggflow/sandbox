@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"time"
 )
 
 // FileInfo holds metadata about a file or directory.
@@ -91,6 +92,10 @@ func (f *FSCategory) List(ctx context.Context, path string) ([]string, error) {
 }
 
 // Stat returns metadata about the file or directory at the given path.
+//
+// The guest agent serialises FileInfo with snake_case JSON tags and emits
+// mod_time as an RFC3339 timestamp from Go's time.Time; we translate both
+// here so callers see idiomatic Go fields.
 func (f *FSCategory) Stat(ctx context.Context, path string) (*FileInfo, error) {
 	result, err := call(ctx, f.cc, op{
 		Method: "fs.stat",
@@ -110,10 +115,15 @@ func (f *FSCategory) Stat(ctx context.Context, path string) (*FileInfo, error) {
 		if v, ok := m["mode"].(float64); ok {
 			info.Mode = int(v)
 		}
-		if v, ok := m["isDir"].(bool); ok {
+		if v, ok := m["is_dir"].(bool); ok {
 			info.IsDir = v
 		}
-		if v, ok := m["modTime"].(float64); ok {
+		switch v := m["mod_time"].(type) {
+		case string:
+			if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+				info.ModTime = t.Unix()
+			}
+		case float64:
 			info.ModTime = int64(v)
 		}
 		return info, nil
@@ -131,10 +141,13 @@ func (f *FSCategory) Remove(ctx context.Context, path string) error {
 }
 
 // Rename moves a file or directory from oldPath to newPath.
+//
+// The agent's RenameParams expects short "old"/"new" keys on the wire; the
+// public API keeps the more descriptive parameter names.
 func (f *FSCategory) Rename(ctx context.Context, oldPath, newPath string) error {
 	_, err := call(ctx, f.cc, op{
 		Method: "fs.rename",
-		Params: map[string]interface{}{"oldPath": oldPath, "newPath": newPath},
+		Params: map[string]interface{}{"old": oldPath, "new": newPath},
 	})
 	return err
 }

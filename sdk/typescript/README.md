@@ -17,7 +17,8 @@ npx jsr add @byggflow/sandbox
 ```ts
 import { createSandbox } from "@byggflow/sandbox";
 
-// Connects to /var/run/sandboxd/sandboxd.sock by default
+// Auto-discovers the daemon: SANDBOXD_ENDPOINT env var, then the Unix socket
+// at /var/run/sandboxd/sandboxd.sock, then http://localhost:7522.
 const sbx = await createSandbox();
 
 await sbx.fs.write("/root/main.py", "print('hello')");
@@ -35,6 +36,15 @@ const sbx = await createSandbox({
   auth: "your-api-token",
 });
 ```
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `SANDBOXD_ENDPOINT` | Default endpoint when no `endpoint` option is passed. |
+| `SBX_AUTH` | Default bearer token when no `auth` option is passed. |
+
+Explicit options always win over the environment.
 
 ## Streaming output
 
@@ -80,6 +90,56 @@ const mgr = templates({ endpoint: "https://sandbox.example.com", auth: "your-api
 const list = await mgr.list();
 ```
 
+## Handling capacity errors
+
+When the daemon is at its sandbox limit it returns 429 / 503 and the SDK throws
+a `CapacityError` with a `retryAfter` (seconds) hint:
+
+```ts
+import { createSandbox, CapacityError } from "@byggflow/sandbox";
+
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!(err instanceof CapacityError) || i === attempts - 1) throw err;
+      await new Promise((r) => setTimeout(r, err.retryAfter * 1000));
+    }
+  }
+  throw new Error("unreachable");
+}
+
+const sbx = await withRetry(() => createSandbox({ profile: "python" }));
+```
+
+Port-tunneling errors (`net.expose`, `net.close`, `net.ports`) also surface as
+`CapacityError` when the daemon's tunnel pool is exhausted.
+
+## Multi-tenant deployments (signed requests)
+
+Plain bearer tokens are fine for trusted callers. For SaaS deployments where a
+reverse proxy sits in front of sandboxd and authenticates end users, use
+`signatureAuth()` to sign each request with an Ed25519 key:
+
+```ts
+import { createSandbox, signatureAuth } from "@byggflow/sandbox";
+
+const sbx = await createSandbox({
+  endpoint: "https://sandbox.acme.com",
+  auth: signatureAuth({
+    privateKey,           // 32- or 64-byte Uint8Array
+    identity: "user-42",  // becomes X-Sandbox-Identity
+    maxConcurrent: 5,     // optional per-request limits
+    maxTTL: 3600,
+  }),
+});
+```
+
+The daemon scopes every resource (sandboxes, templates, tunnels) to the signed
+identity. See the SECURITY section in the main README for the full key-rotation
+flow.
+
 ## End-to-end encryption
 
 ```ts
@@ -93,10 +153,13 @@ The SDK and guest agent perform a key exchange (X25519). All payloads are encryp
 | Category | Operations |
 |---|---|
 | **fs** | `read`, `write`, `list`, `stat`, `remove`, `rename`, `mkdir`, `upload`, `download` |
-| **process** | `exec`, `streamExec`, `spawn`, `pty` |
+| **process** | `exec`, `streamExec` |
 | **env** | `get`, `set`, `delete`, `list` |
 | **net** | `fetch`, `url`, `expose`, `close`, `ports` |
 | **template** | `save` |
+
+`process.spawn` and `process.pty` are supported by the agent and Go SDK but
+are not yet exposed through this TypeScript SDK; see issue tracker for status.
 
 ## License
 
