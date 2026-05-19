@@ -6,6 +6,15 @@ import { createSandbox as sdkCreateSandbox } from "../sandbox.ts";
 const ENDPOINT = process.env.SANDBOXD_ENDPOINT ?? "";
 const skip = !ENDPOINT;
 
+// Tests that have the sandbox dial back to an httptest server in this
+// process require the daemon and the test process to share a network
+// namespace. In containerized CI the daemon runs in Docker, so its
+// 127.0.0.1 is its own loopback (not the test process), and the
+// upstream dial fails with "connection refused" → 502. Gate behind an
+// explicit env var so CI cleanly skips rather than reporting these
+// tests as failures.
+const skipNeedsReachableUpstream = skip || !process.env.SANDBOXD_INTEGRATION_NETWORK;
+
 /** Convert http(s) URL to ws(s) URL. */
 function wsUrl(httpUrl: string): string {
   return httpUrl.replace(/^http/, "ws");
@@ -131,7 +140,7 @@ describe.skipIf(skip)("network middleware integration", () => {
     return info;
   }
 
-  test("inject rule adds header that sandbox never sees", async () => {
+  test.skipIf(skipNeedsReachableUpstream)("inject rule adds header that sandbox never sees", async () => {
     const upstream = await spawnUpstream();
     try {
       const sbx = await createTracked();
@@ -169,7 +178,7 @@ describe.skipIf(skip)("network middleware integration", () => {
     }
   });
 
-  test("defer rule invokes SDK handler and forwards modified request", async () => {
+  test.skipIf(skipNeedsReachableUpstream)("defer rule invokes SDK handler and forwards modified request", async () => {
     const upstream = await spawnUpstream();
     try {
       let handlerCalls = 0;
@@ -213,7 +222,7 @@ describe.skipIf(skip)("network middleware integration", () => {
     }
   });
 
-  test("defer rule can short-circuit with a synthetic response", async () => {
+  test.skipIf(skipNeedsReachableUpstream)("defer rule can short-circuit with a synthetic response", async () => {
     const upstream = await spawnUpstream();
     try {
       let handlerCalls = 0;

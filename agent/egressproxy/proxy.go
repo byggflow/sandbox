@@ -181,12 +181,27 @@ func (s *Server) handlePlain(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	if err := streamBodyTo(ch, w, flusher); err != nil {
 		s.log.Debug("egress: stream body", "error", err)
+		// We've already started writing the response (status + headers
+		// + possibly some chunks). The only way to signal "this body
+		// is truncated, do NOT treat as successful" to the sandbox
+		// client is to break the underlying TCP connection. Panicking
+		// with http.ErrAbortHandler is how net/http's docs say to do
+		// this: the server suppresses the panic log and closes the
+		// conn without writing a chunked terminator, so the sandbox
+		// client sees an abnormal EOF rather than a clean response.
+		panic(http.ErrAbortHandler)
 	}
 }
 
 // streamBodyTo reads chunks from ch and writes them to w, flushing each
-// chunk so SSE clients see events as they arrive. Returns nil on a clean
-// stream end, or the daemon-reported error on a failed stream.
+// chunk so SSE clients see events as they arrive. Returns:
+//   - nil only when the stream ends cleanly (terminal frame with
+//     StreamEndOK, errMsg empty)
+//   - the daemon-reported error when the terminal frame carries one
+//   - errStreamClosedWithoutTerminal when the channel closes without
+//     any terminal frame (closeAll timeout path — the response body
+//     is truncated and we MUST signal this to the caller so it can
+//     break the underlying conn rather than write a clean terminator)
 func streamBodyTo(ch <-chan streamChunk, w io.Writer, flusher http.Flusher) error {
 	for chunk := range ch {
 		if chunk.end {
@@ -202,8 +217,18 @@ func streamBodyTo(ch <-chan streamChunk, w io.Writer, flusher http.Flusher) erro
 			flusher.Flush()
 		}
 	}
-	return nil
+	// Channel closed without an end marker. This only happens via
+	// closeAll's timeout fallback (daemon connection dropped and the
+	// terminal frame didn't fit in the buffer in time). Treat as
+	// truncation, not clean EOF.
+	return errStreamClosedWithoutTerminal
 }
+
+// errStreamClosedWithoutTerminal indicates the stream channel closed
+// before a terminal frame arrived. Callers MUST surface this as an
+// abnormal termination — never a clean response — or they risk
+// reporting a truncated body as successful.
+var errStreamClosedWithoutTerminal = errors.New("egress stream closed without terminal marker (forced teardown)")
 
 // copyHeaders converts http.Header into our wire-format header map,
 // stripping hop-by-hop entries so the upstream never sees them.

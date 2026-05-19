@@ -4,11 +4,33 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/coder/websocket"
 )
+
+// requireDaemonReachableUpstream skips the calling test unless the
+// caller has explicitly attested that the daemon can dial back to the
+// test process. The network-middleware integration tests use
+// httptest.NewServer (which binds to host 127.0.0.1) as a controlled
+// upstream and have the sandbox issue a fetch to it; the daemon then
+// dials that upstream from its own network namespace. In containerized
+// CI the daemon runs in Docker, so 127.0.0.1 inside the daemon is the
+// daemon's loopback — not the test process — and the dial fails with
+// "connection refused" (surfaces as 502).
+//
+// Set SANDBOXD_INTEGRATION_NETWORK=1 when running locally with a
+// daemon that shares a network namespace with the test process (e.g.
+// sandboxd binary on the host). CI should leave this unset until we
+// add proper containerized test fixtures.
+func requireDaemonReachableUpstream(t *testing.T) {
+	t.Helper()
+	if os.Getenv("SANDBOXD_INTEGRATION_NETWORK") == "" {
+		t.Skip("requires daemon and test process to share a network namespace; set SANDBOXD_INTEGRATION_NETWORK=1 to enable")
+	}
+}
 
 // TestNetworkInjectHeader verifies that an inject rule installed via
 // net.rules.set causes the daemon to add the configured header to outbound
@@ -19,6 +41,7 @@ import (
 // it received, install an inject rule for that host, then call net.fetch
 // from inside the sandbox via the WebSocket.
 func TestNetworkInjectHeader(t *testing.T) {
+	requireDaemonReachableUpstream(t)
 	ep := endpoint(t)
 
 	// Capture what the upstream sees.
