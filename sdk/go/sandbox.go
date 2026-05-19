@@ -315,6 +315,13 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 
 	// Install any rules supplied via opts.Network.Egress before returning.
 	if opts != nil && opts.Network != nil && len(opts.Network.Egress) > 0 {
+		// E2E encryption hides params from the daemon; network
+		// middleware requires daemon-side rule evaluation. Fail fast
+		// rather than silently dropping the rules over the wire.
+		if opts.Encrypted {
+			sbx.Close()
+			return nil, fmt.Errorf("sandbox: network middleware is incompatible with Encrypted=true (the daemon needs to read params to apply rules)")
+		}
 		if err := sbx.Net().Intercept(ctx, opts.Network.Egress); err != nil {
 			sbx.Close()
 			return nil, fmt.Errorf("sandbox: install network rules: %w", err)

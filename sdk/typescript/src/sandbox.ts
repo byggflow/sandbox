@@ -865,6 +865,14 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   // do this after construction so the same code path is used as a runtime
   // intercept() call.
   if (opts?.network?.egress && opts.network.egress.length > 0) {
+    if (opts.encrypted) {
+      // E2E encryption hides params from the daemon; network middleware
+      // requires daemon-side rule evaluation. Fail fast here rather
+      // than silently dropping the rules.
+      throw new Error(
+        "network middleware is incompatible with encrypted=true (the daemon needs to read params to apply rules)",
+      );
+    }
     await sbx.network.intercept(opts.network.egress);
   }
 

@@ -446,6 +446,8 @@ HTTPS is intercepted transparently. Each sandbox gets its own ECDSA P-256 certif
 
 Match clauses support exact hosts (`"api.openai.com"`), suffix globs (`"*.github.com"`), and regex (`"/^[a-z]+\\.evil\\.test$/"`). The most-specific match wins; an exact host beats a wildcard suffix, and a deeper suffix beats a shallower one.
 
+**Enforcement model.** Egress rules apply to traffic that flows through the proxy — any HTTP client honoring `HTTP_PROXY` / `HTTPS_PROXY` (Node fetch, Python requests, Go net/http, curl, ...) routes through it automatically. Code that opens raw TCP sockets, ignores proxy env vars, or uses non-HTTP protocols bypasses the middleware entirely. Treat rules as cooperative unless you've separately constrained the sandbox's network namespace (e.g. iptables egress allowlist that REDIRECTs to the proxy). Network-level enforcement is a planned follow-up; today it's the operator's responsibility for untrusted-code scenarios that need a hard guarantee. Network middleware is also incompatible with `encrypted: true` (E2E hides RPC params from the daemon); the SDKs reject the combination at `createSandbox` time.
+
 ## CLI reference
 
 ### Sandbox lifecycle

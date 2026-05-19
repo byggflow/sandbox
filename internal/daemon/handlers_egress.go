@@ -195,16 +195,39 @@ func (d *Daemon) serveEgress(ctx context.Context, sbxID string, deferFn netegres
 
 // serveRulesSet replaces the registered rule list for a sandbox.
 func (d *Daemon) serveRulesSet(_ context.Context, sbxID string, params json.RawMessage) (interface{}, error) {
+	if err := rejectEncryptedParams(params, "net.rules.set"); err != nil {
+		return nil, err
+	}
 	var req struct {
 		Rules []netrules.Rule `json:"rules"`
 	}
 	if err := json.Unmarshal(params, &req); err != nil {
-		return nil, fmt.Errorf("decode rules params: %w", err)
+		return nil, fmt.Errorf("decoding rules params: %w", err)
 	}
 	if err := d.Egress.SetRules(sbxID, req.Rules); err != nil {
-		return nil, fmt.Errorf("install rules: %w", err)
+		return nil, fmt.Errorf("installing rules: %w", err)
 	}
 	return map[string]interface{}{"installed": len(req.Rules)}, nil
+}
+
+// rejectEncryptedParams refuses a daemon-served RPC whose params are
+// E2E-encrypted. Encrypted params arrive as {"_encrypted":"..."}: the
+// daemon doesn't have the session key (that's the whole point of E2E),
+// so decoding into the expected param shape would silently succeed
+// with all zero-valued fields — net.rules.set would clear all rules,
+// net.fetch would receive an empty URL.
+//
+// Network middleware is fundamentally incompatible with E2E encryption
+// (the daemon MUST see plaintext to apply rules). We surface this as a
+// clear error rather than silently corrupting state.
+func rejectEncryptedParams(params json.RawMessage, method string) error {
+	var probe struct {
+		Encrypted string `json:"_encrypted"`
+	}
+	if err := json.Unmarshal(params, &probe); err == nil && probe.Encrypted != "" {
+		return fmt.Errorf("%s is unavailable on E2E-encrypted sessions; create the sandbox without encrypted=true to use network middleware", method)
+	}
+	return nil
 }
 
 // serveSDKFetch translates a net.fetch RPC from the SDK into an
@@ -212,6 +235,9 @@ func (d *Daemon) serveRulesSet(_ context.Context, sbxID string, params json.RawM
 // when clientLocalMethodsFor confirms this sandbox has rules registered,
 // so we always produce a real response (no fall-through to agent).
 func (d *Daemon) serveSDKFetch(ctx context.Context, sbxID string, deferFn netegress.DeferFunc, params json.RawMessage) (interface{}, error) {
+	if err := rejectEncryptedParams(params, "net.fetch"); err != nil {
+		return nil, err
+	}
 	var p struct {
 		URL     string            `json:"url"`
 		Method  string            `json:"method,omitempty"`

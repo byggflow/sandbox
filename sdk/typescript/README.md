@@ -104,6 +104,8 @@ Match clauses accept exact hosts, suffix globs (`"*.github.com"`), or regex (`"/
 
 HTTPS is intercepted transparently via a per-sandbox CA that the daemon mints. Leaf certs are signed on demand for each SNI host and cached. The CA private key never leaves the daemon; injected credentials never enter the sandbox.
 
+**Enforcement is cooperative.** Rules apply to HTTP clients that honor `HTTP_PROXY` / `HTTPS_PROXY` (Node fetch, Python requests, Go net/http, curl, ...). Code that opens raw TCP sockets or ignores proxy env vars bypasses the middleware. For untrusted-code scenarios that need a hard guarantee, run the sandbox inside an egress-restricted network namespace. Network middleware is also incompatible with `encrypted: true` — E2E encryption hides RPC params from the daemon, so rules can't be evaluated; `createSandbox` rejects the combination.
+
 ## Connect to an existing sandbox
 
 ```ts
