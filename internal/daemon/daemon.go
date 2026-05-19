@@ -9,6 +9,7 @@ import (
 
 	"github.com/byggflow/sandbox/internal/config"
 	"github.com/byggflow/sandbox/internal/identity"
+	"github.com/byggflow/sandbox/internal/netegress"
 	"github.com/byggflow/sandbox/internal/pool"
 	"github.com/byggflow/sandbox/internal/proxy"
 	"github.com/byggflow/sandbox/internal/runtime"
@@ -27,6 +28,7 @@ type Daemon struct {
 	Metrics   *Metrics
 	Events    *EventBus
 	Tunnels   *TunnelManager
+	Egress    *netegress.Handler
 	verifier  atomic.Pointer[identity.Verifier] // Non-nil when multi-tenant mode is enabled.
 	AuthLimit   *rateLimiter                    // Rate limiter for failed auth attempts.
 	CreateLimit *rateLimiter                    // Rate limiter for sandbox creation per identity.
@@ -90,6 +92,7 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		Metrics:          NewMetrics(),
 		Events:          NewEventBus(0),
 		Tunnels:         NewTunnelManager(cfg.Limits.TunnelBindAddress, cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
+		Egress:          netegress.New(),
 		AuthLimit:       newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
 		CreateLimit:     newRateLimiter(cfg.Limits.CreateRateLimit, 1*time.Minute, cfg.Limits.RateLimitEntries),
 		Log:             log,
@@ -331,12 +334,19 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		ttl = d.Config.Limits.MaxTTL
 	}
 
-	// Generate ID and auth token.
+	// Generate ID, long-lived auth token, and single-use bootstrap nonce.
+	// The token stays on the daemon and is delivered to the agent over
+	// the first authenticated connection via auth.bootstrap; only the
+	// nonce ever appears in the container's environment / kernel cmdline.
 	sbxID, err := GenerateID(d.Config.Server.NodeID)
 	if err != nil {
 		return nil, err
 	}
 	authToken, err := GenerateAuthToken()
+	if err != nil {
+		return nil, err
+	}
+	authBootstrap, err := GenerateBootstrapNonce()
 	if err != nil {
 		return nil, err
 	}
@@ -383,6 +393,17 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 			if err := d.Registry.Add(sbx); err != nil {
 				return nil, err
 			}
+			// Push the per-sandbox CA over the existing authenticated
+			// agent connection. Warm-pool sandboxes don't go through
+			// rt.Create's readiness loop where Docker/Firecracker install
+			// the CA, so we have to do it explicitly on claim.
+			if err := d.installCAOnWarm(ctx, sbx); err != nil {
+				// Roll the sandbox back rather than expose a broken
+				// network-middleware feature to the user.
+				_ = d.Registry.Remove(sbx.ID)
+				return nil, fmt.Errorf("installing ca on warm sandbox: %w", err)
+			}
+			d.registerSandboxCleanup(sbx)
 			d.Metrics.IncCreateWarm()
 			d.publishSandboxEvent("sandbox.created", sbx, map[string]interface{}{
 				"image":   image,
@@ -395,16 +416,35 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		}
 	}
 
+	// Network middleware: opt-out per sandbox. "off" skips proxy env,
+	// CA generation, and the trust-bundle env vars entirely. Default is
+	// to wire everything up so rules can be installed later.
+	egressEnabled := d.Egress != nil && req.NetworkMode != "off"
+
+	// Eagerly generate the per-sandbox egress CA so its PEM can be passed
+	// to the runtime as an env var. The CA itself lives only on the daemon.
+	var caCertPEM string
+	if egressEnabled {
+		ca, err := d.Egress.EnsureCA(sbxID)
+		if err != nil {
+			return nil, fmt.Errorf("generate egress ca: %w", err)
+		}
+		caCertPEM = string(ca.CertPEM())
+	}
+
 	// Cold start: create a new instance via the runtime.
 	d.Log.Info("cold starting sandbox", "id", sbxID, "image", image, "runtime", runtimeName)
 	inst, err := rt.Create(ctx, runtime.CreateOpts{
-		Image:     image,
-		Memory:    memory,
-		CPU:       cpu,
-		Storage:   storage,
-		AuthToken: authToken,
-		Labels:    req.Labels,
-		Profile:   profile,
+		Image:         image,
+		Memory:        memory,
+		CPU:           cpu,
+		Storage:       storage,
+		AuthToken:     authToken,
+		AuthBootstrap: authBootstrap,
+		Labels:        req.Labels,
+		Profile:       profile,
+		CACertPEM:     caCertPEM,
+		EgressProxy:   egressEnabled,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create instance: %w", err)
@@ -432,6 +472,7 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	if err := d.Registry.Add(sbx); err != nil {
 		return nil, err
 	}
+	d.registerSandboxCleanup(sbx)
 
 	d.Metrics.IncCreateCold()
 	d.publishSandboxEvent("sandbox.created", sbx, map[string]interface{}{
@@ -442,6 +483,39 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	})
 	d.Log.Info("sandbox created (cold)", "id", sbxID, "container", inst.ID[:12])
 	return sbx, nil
+}
+
+// registerSandboxCleanup wires per-sandbox subsystem cleanup into the
+// sandbox's OnDestroy fan-out. Any new per-sandbox state (egress rules,
+// CA cache, future things) belongs here so destroySandbox stays a one-line
+// fan-out instead of growing a list of hardcoded calls.
+func (d *Daemon) registerSandboxCleanup(sbx *Sandbox) {
+	if d.Egress != nil {
+		sbx.OnDestroy(func() { d.Egress.ClearRules(sbx.ID) })
+	}
+}
+
+// installCAOnWarm pushes the per-sandbox egress CA to a sandbox claimed
+// from the warm pool. The pool's rt.Create already passed; we just need
+// to deliver the CA over the existing authenticated channel before
+// reporting the sandbox as ready.
+func (d *Daemon) installCAOnWarm(_ context.Context, sbx *Sandbox) error {
+	if d.Egress == nil {
+		return nil
+	}
+	ca, err := d.Egress.EnsureCA(sbx.ID)
+	if err != nil {
+		return fmt.Errorf("generating egress ca: %w", err)
+	}
+	agent, err := d.ConnectAgent(sbx)
+	if err != nil {
+		return fmt.Errorf("connecting agent: %w", err)
+	}
+	defer agent.Close()
+	if err := agent.InstallCA(string(ca.CertPEM()), 5*time.Second); err != nil {
+		return fmt.Errorf("pushing ca: %w", err)
+	}
+	return nil
 }
 
 // DestroySandbox removes a sandbox and its container.
@@ -457,6 +531,7 @@ func (d *Daemon) destroySandbox(ctx context.Context, sbx *Sandbox) error {
 	}
 
 	d.Metrics.IncDestroy()
+	sbx.runDestroyCallbacks()
 	d.publishSandboxEvent("sandbox.destroyed", sbx, nil)
 
 	sbx.mu.Lock()
@@ -640,6 +715,16 @@ type CreateRequest struct {
 	Storage  string            `json:"storage"` // tmpfs size for /root (e.g. "500m", "1g"). Overrides profile default.
 	TTL      int               `json:"ttl"`
 	Labels   map[string]string `json:"labels"`
+	// NetworkMode controls whether the sandbox is wired through the
+	// daemon's egress proxy. Empty or "auto" (default) injects
+	// HTTP(S)_PROXY env vars, pushes the per-sandbox CA, and exports
+	// the trust-bundle env vars so middleware rules apply. "off" skips
+	// all of it: the sandbox dials upstreams directly, no rule
+	// evaluation happens for sandbox-process traffic, no CA is
+	// generated. SDK-mediated sbx.net.fetch() still works (it routes
+	// through the daemon regardless) but rules don't apply to it
+	// either.
+	NetworkMode string `json:"network_mode,omitempty"`
 }
 
 // CreateTemplateRequest is the request body for POST /templates.

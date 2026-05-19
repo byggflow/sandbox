@@ -46,6 +46,9 @@ type Sandbox struct {
 	httpClient  *http.Client
 	httpBaseURL string
 	authHeaders map[string]string
+
+	// Cached NetCategory so the local rules mirror persists across Net() calls.
+	net *NetCategory
 }
 
 // FS returns the filesystem category for this sandbox.
@@ -63,15 +66,20 @@ func (s *Sandbox) Env() *EnvCategory {
 	return &EnvCategory{cc: s.cc}
 }
 
-// Net returns the network category for this sandbox.
+// Net returns the network category for this sandbox. The NetCategory is
+// cached on the Sandbox so the rule mirror used by Allow/Deny/Inject
+// persists across calls.
 func (s *Sandbox) Net() *NetCategory {
-	return &NetCategory{
-		cc:          s.cc,
-		httpClient:  s.httpClient,
-		httpBaseURL: s.httpBaseURL,
-		authHeaders: s.authHeaders,
-		sandboxID:   s.ID,
+	if s.net == nil {
+		s.net = &NetCategory{
+			cc:          s.cc,
+			httpClient:  s.httpClient,
+			httpBaseURL: s.httpBaseURL,
+			authHeaders: s.authHeaders,
+			sandboxID:   s.ID,
+		}
 	}
+	return s.net
 }
 
 // Template returns the template category for this sandbox.
@@ -203,6 +211,9 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 		if len(opts.Labels) > 0 {
 			body["labels"] = opts.Labels
 		}
+		if opts.Network != nil && opts.Network.Disabled {
+			body["network_mode"] = "off"
+		}
 	}
 
 	bodyJSON, err := json.Marshal(body)
@@ -301,6 +312,15 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 		httpBaseURL: baseURL,
 		authHeaders: headers,
 	}
+
+	// Install any rules supplied via opts.Network.Egress before returning.
+	if opts != nil && opts.Network != nil && len(opts.Network.Egress) > 0 {
+		if err := sbx.Net().Intercept(ctx, opts.Network.Egress); err != nil {
+			sbx.Close()
+			return nil, fmt.Errorf("sandbox: install network rules: %w", err)
+		}
+	}
+
 	return sbx, nil
 }
 

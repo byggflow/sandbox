@@ -58,7 +58,39 @@ type Sandbox struct {
 	// Active port tunnels keyed by container port.
 	Tunnels map[int]*Tunnel `json:"-"`
 
+	// onDestroy is a fan-out for per-sandbox cleanup callbacks. Callbacks
+	// run once, in registration order, inside destroySandbox. Subsystems
+	// that hold per-sandbox state (egress rules, CA caches, ...) register
+	// here at create time so the destroy path doesn't accumulate a list
+	// of hardcoded cleanups.
+	onDestroy []func()
+
 	mu sync.Mutex
+}
+
+// OnDestroy registers a callback that runs once when the sandbox is being
+// destroyed. Callbacks run in registration order while the sandbox is in
+// the StateStopping phase, before the runtime tears down the container.
+func (s *Sandbox) OnDestroy(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onDestroy = append(s.onDestroy, fn)
+	s.mu.Unlock()
+}
+
+// runDestroyCallbacks invokes every registered callback in order, then
+// clears the list so a callback can't run twice. Caller must NOT hold
+// s.mu — callbacks may take the mutex transitively.
+func (s *Sandbox) runDestroyCallbacks() {
+	s.mu.Lock()
+	cbs := s.onDestroy
+	s.onDestroy = nil
+	s.mu.Unlock()
+	for _, fn := range cbs {
+		fn()
+	}
 }
 
 // SandboxInfo is the JSON-serializable sandbox information returned by the API.
@@ -157,6 +189,12 @@ func (s *Sandbox) CancelReaper() {
 }
 
 // Registry manages active sandboxes.
+//
+// sandboxes is intentionally an unbounded map: its size is enforced
+// externally by Daemon.Config.Limits.MaxSandboxes, which gates Add via
+// the capacity check in CreateSandbox. The "bound every collection"
+// rule from conventions/PERFORMANCE.md is satisfied by that external
+// limit; this map is not the right place to add eviction.
 type Registry struct {
 	mu          sync.RWMutex
 	sandboxes   map[string]*Sandbox
@@ -291,6 +329,18 @@ func (s *Sandbox) ContainerIP() string {
 		return s.AgentAddr
 	}
 	return host
+}
+
+// GenerateBootstrapNonce creates the single-use nonce delivered to the
+// guest via cmdline/env. The agent trades this nonce for the long-lived
+// AuthToken over the first authenticated connection and then invalidates
+// it; a sandbox process that reads it from /proc/cmdline gains nothing.
+func GenerateBootstrapNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating bootstrap nonce: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // GenerateID creates a new sandbox ID. If nodeID is non-empty, the format is

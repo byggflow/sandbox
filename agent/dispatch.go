@@ -6,16 +6,44 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 
+	"github.com/byggflow/sandbox/agent/egressproxy"
 	"github.com/byggflow/sandbox/agent/env"
 	"github.com/byggflow/sandbox/agent/fs"
-	agentnet "github.com/byggflow/sandbox/agent/net"
 	"github.com/byggflow/sandbox/agent/process"
 	codec "github.com/byggflow/sandbox/agent/protocol"
 	proto "github.com/byggflow/sandbox/protocol"
 	"github.com/byggflow/sandbox/protocol/crypto"
 )
+
+// installCA is the OpNetCAInstall handler. The daemon pushes the
+// per-sandbox CA during the readiness check; we write it to disk so
+// user processes can validate leaf certs minted later by the daemon.
+// We also set the standard trust-bundle env vars on the agent process
+// so spawned children inherit them — needed for Firecracker where
+// container env vars don't exist.
+func installCA(params json.RawMessage) (interface{}, error) {
+	var req proto.CAInstallRequest
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, fmt.Errorf("decoding ca install params: %w", err)
+	}
+	if err := egressproxy.WriteCAFiles(req.CertPEM); err != nil {
+		return nil, fmt.Errorf("installing ca: %w", err)
+	}
+	for k, v := range map[string]string{
+		"NODE_EXTRA_CA_CERTS": egressproxy.CAPath,
+		"SSL_CERT_FILE":       egressproxy.CABundlePath,
+		"REQUESTS_CA_BUNDLE":  egressproxy.CABundlePath,
+		"CURL_CA_BUNDLE":      egressproxy.CABundlePath,
+		"GIT_SSL_CAINFO":      egressproxy.CABundlePath,
+	} {
+		_ = os.Setenv(k, v)
+	}
+	slog.Info("sandbox ca installed", "path", egressproxy.CAPath)
+	return map[string]interface{}{"installed": true}, nil
+}
 
 // SimpleHandler handles a request that only needs params and returns a result.
 type SimpleHandler func(params json.RawMessage) (interface{}, error)
@@ -79,8 +107,12 @@ func NewDispatcher() *Dispatcher {
 	d.simple[proto.OpEnvDelete] = envStore.Delete
 	d.simple[proto.OpEnvList] = envStore.List
 
-	// Network
-	d.simple[proto.OpNetFetch] = agentnet.Fetch
+	// Network. OpNetFetch is intentionally NOT registered here —
+	// SDK-initiated fetches are claimed and served by the daemon, which
+	// applies any installed rules and dials with the SSRF-hardened
+	// guardedDialContext. Routing through the agent would bypass the
+	// daemon's rule application and duplicate the private-IP guard.
+	d.simple[proto.OpNetCAInstall] = installCA
 
 	// E2E encryption negotiation
 	d.simple[proto.OpSessionNegotiateE2E] = d.negotiateE2E

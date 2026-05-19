@@ -146,3 +146,8 @@ func (a *vsockAddr) String() string {
 	return fmt.Sprintf("vsock(%d:%d)", a.cid, a.port)
 }
 
+// CID returns the vsock peer CID. Exported so the peer-auth listener
+// filter in this package can reject connections whose source CID isn't
+// the host (VMADDR_CID_HOST = 2).
+func (a *vsockAddr) CID() uint32 { return a.cid }
+

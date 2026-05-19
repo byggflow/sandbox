@@ -42,4 +42,6 @@ Credentialed communication relies strictly on the context. This avoids global st
 TypeScript: `headers: { 'X-User': base.userId }`
 Go: `req.Header.Set("X-User", ctx.UserID)`
 
+Wrapped errors follow one shape. Go errors wrapped with `%w` use the form `verb-ing object: %w` -- lowercase verb, no trailing period, no echo of caller input that is already in the wrapped error. Prefer `fmt.Errorf("dialing agent: %w", err)` over `fmt.Errorf("Failed to dial agent %q: %w.", addr, err)`. This keeps a chain of wrapped errors readable in logs and makes `errors.Is` matching predictable.
+
 These rules together create libraries that remain consistent as domains grow. Developers understand the shape by learning it once, and every new category or action follows the same patterns.

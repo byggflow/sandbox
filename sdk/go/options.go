@@ -32,6 +32,10 @@ type Options struct {
 	Labels map[string]string
 	// Encrypted enables end-to-end encryption.
 	Encrypted bool
+	// Network installs egress middleware on the daemon at create time. Rules
+	// run on the daemon, so any credentials injected via SetHeaders never
+	// enter the sandbox. See NetCategory.Intercept for the runtime API.
+	Network *NetworkConfig
 }
 
 // ConnectOptions configures connecting to an existing sandbox.

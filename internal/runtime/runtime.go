@@ -29,9 +29,33 @@ type CreateOpts struct {
 	Memory    int64   // bytes
 	CPU       float64 // cores
 	Storage   string  // tmpfs size (e.g. "500m", "1g")
+	// AuthToken is the long-lived secret the daemon uses to authenticate
+	// to the agent for the lifetime of this sandbox. It is NEVER passed
+	// via the container environment or kernel cmdline — instead the
+	// daemon delivers it over the first authenticated connection via
+	// auth.bootstrap. See AuthBootstrap.
 	AuthToken string
-	Labels    map[string]string
-	Profile   string
+	// AuthBootstrap is a single-use nonce passed to the guest at boot
+	// (env var on Docker, kernel cmdline on Firecracker) that the agent
+	// trades for the long-lived AuthToken on the first connection. It
+	// is invalidated immediately after use; a sandbox process that
+	// reads it from /proc/cmdline gains nothing.
+	AuthBootstrap string
+	Labels        map[string]string
+	Profile       string
+	// CACertPEM is the per-sandbox egress CA certificate (PEM-encoded).
+	// When set, the runtime injects the matching trust-bundle env vars
+	// and pushes the CA over the agent connection during the readiness
+	// check. Empty disables TLS interception.
+	CACertPEM string
+	// EgressProxy controls whether the runtime wires HTTP_PROXY/HTTPS_PROXY
+	// at container startup. When false (default), sandboxes opt out of
+	// the egress middleware: their HTTP clients dial upstreams directly
+	// and pay no proxy-detour overhead. When true, the runtime sets the
+	// proxy env vars at 127.0.0.1:8118 so the agent's in-sandbox proxy
+	// catches outbound HTTP. The daemon should set this to true only
+	// when the user has configured network middleware for the sandbox.
+	EgressProxy bool
 }
 
 // Runtime abstracts the sandbox execution backend (Docker, Firecracker, etc.).

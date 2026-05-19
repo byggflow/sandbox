@@ -70,6 +70,97 @@ export interface SandboxOptions {
   ttl?: number;
   labels?: Record<string, string>;
   encrypted?: boolean;
+  /**
+   * Network middleware. Rules run on the daemon, so injected headers and
+   * credentials never enter the sandbox.
+   *
+   * The egress array is pushed to the daemon immediately after the WebSocket
+   * connects. Sandbox processes that respect HTTP_PROXY (most HTTP libraries)
+   * route through the daemon, and any rule whose match clause fits is applied
+   * before the daemon dials the upstream.
+   *
+   * For HTTPS without TLS MITM (the current default), only `sbx.network.fetch()`
+   * (and equivalent SDK-mediated calls) get the injection benefit. Transparent
+   * HTTPS interception is a follow-up.
+   */
+  network?: NetworkConfig;
+}
+
+/** Inject mutations applied to a matched egress request. */
+export interface NetworkInject {
+  setHeaders?: Record<string, string>;
+  removeHeaders?: string[];
+  setQuery?: Record<string, string>;
+}
+
+/** Match clause for a network rule. */
+export interface NetworkMatch {
+  /** Host glob: exact ("api.openai.com"), suffix ("*.github.com"), or /regex/. */
+  host?: string;
+  port?: number;
+  /** Comma-separated method list, e.g. "GET,POST". */
+  method?: string;
+  pathPrefix?: string;
+}
+
+/** A single egress rule. */
+export interface NetworkRule {
+  id?: string;
+  match: NetworkMatch;
+  action: "allow" | "deny" | "inject" | "defer";
+  inject?: NetworkInject;
+  /**
+   * Programmatic handler. Only consulted when action === "defer".
+   *
+   * The handler runs in your SDK process (not the daemon, not the sandbox),
+   * so it can do async work like minting per-request tokens. Return a
+   * (possibly modified) DeferredRequest to continue dialing, or a
+   * DeferredResponse to short-circuit without touching the upstream.
+   */
+  handler?: NetworkHandler;
+}
+
+/** Request envelope passed to a network handler. Mutations to headers
+ * or URL are sent back to the daemon and used for the actual dial. */
+export interface DeferredRequest {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  /** Base64-encoded request body. Empty when there is no body. */
+  body: string;
+}
+
+/** Synthetic response a handler can return to short-circuit dialing. */
+export interface DeferredResponse {
+  status: number;
+  headers?: Record<string, string>;
+  /** Base64-encoded response body. */
+  body?: string;
+}
+
+/** Handler signature for action === "defer" rules. Receives the request
+ * the daemon was about to dial; returns either a modified request or a
+ * synthetic response. */
+export type NetworkHandler = (req: DeferredRequest) =>
+  | { request: DeferredRequest }
+  | { response: DeferredResponse }
+  | Promise<{ request: DeferredRequest } | { response: DeferredResponse }>;
+
+/** Network middleware configuration installed at sandbox creation. */
+export interface NetworkConfig {
+  egress?: NetworkRule[];
+  /**
+   * Wire the sandbox through the daemon's egress proxy. When false, no
+   * HTTP(S)_PROXY env vars are injected, no per-sandbox CA is
+   * generated or pushed, and sandbox processes dial upstreams
+   * directly. Default: true.
+   *
+   * `sbx.net.fetch()` still routes through the daemon either way (the
+   * daemon dials on the SDK's behalf for that path), so it works
+   * without the proxy — but no rule evaluation happens for it when
+   * enabled is false.
+   */
+  enabled?: boolean;
 }
 
 /** Options for connecting to an existing sandbox by ID. */
@@ -149,6 +240,26 @@ export interface Sandbox {
     expose(port: number, opts?: { timeout?: number }): Promise<TunnelInfo>;
     close(port: number): Promise<void>;
     ports(): Promise<TunnelInfo[]>;
+  };
+  /**
+   * Programmatic egress middleware. Rules are evaluated on the daemon — the
+   * sandbox never sees credentials installed via inject rules.
+   *
+   * Replace the rule set wholesale with `intercept(rules)`, or use the
+   * `allow`/`deny`/`inject`/`defer` convenience helpers that update
+   * incrementally.
+   */
+  network: {
+    /** Replace the entire rule set for this sandbox. */
+    intercept(rules: NetworkRule[]): Promise<void>;
+    /** Append a deny rule for the given host glob. */
+    deny(host: string): Promise<void>;
+    /** Append an allow rule for the given host glob. */
+    allow(host: string): Promise<void>;
+    /** Append an inject-headers rule for the given host glob. */
+    inject(host: string, headers: Record<string, string>): Promise<void>;
+    /** Append a defer rule: the daemon calls your handler on each match. */
+    defer(host: string, handler: NetworkHandler, id?: string): Promise<void>;
   };
   template: {
     save(opts?: { label?: string }): Promise<{ id: string }>;
@@ -482,10 +593,101 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
       },
     },
 
+    network: (() => {
+      // Local mirror of installed rules so allow/deny/inject can append
+      // incrementally without round-tripping the full list from the daemon.
+      let current: NetworkRule[] = [];
+
+      // Handler registry: rule ID -> user function. Defer rules carry only
+      // their ID over the wire; the function stays in the SDK process.
+      const handlers = new Map<string, NetworkHandler>();
+
+      // Register the dispatcher for incoming net.defer requests. Only
+      // wires once per buildSandbox; subsequent intercept() calls just
+      // mutate the handlers map.
+      transport.onRequest(async (method, params) => {
+        if (method !== "net.defer") return undefined;
+        const p = params as { rule_id: string; request: DeferredRequest };
+        const fn = handlers.get(p.rule_id);
+        if (!fn) {
+          throw new Error(`no handler registered for rule ${p.rule_id}`);
+        }
+        const result = await fn(p.request);
+        if ("response" in result && result.response) {
+          return { response: result.response };
+        }
+        return { request: (result as { request: DeferredRequest }).request };
+      });
+
+      const push = async () => {
+        // Update handlers registry from the current rule list.
+        handlers.clear();
+        for (const r of current) {
+          if (r.action === "defer" && r.handler) {
+            if (!r.id) throw new Error("network.intercept: defer rules require an id");
+            handlers.set(r.id, r.handler);
+          }
+        }
+        await call(ctx, {
+          method: "net.rules.set",
+          params: { rules: current.map(toWireRule) },
+        });
+      };
+
+      return {
+        async intercept(rules: NetworkRule[]): Promise<void> {
+          current = rules.slice();
+          await push();
+        },
+        async deny(host: string): Promise<void> {
+          current.push({ match: { host }, action: "deny" });
+          await push();
+        },
+        async allow(host: string): Promise<void> {
+          current.push({ match: { host }, action: "allow" });
+          await push();
+        },
+        async inject(host: string, headers: Record<string, string>): Promise<void> {
+          current.push({
+            match: { host },
+            action: "inject",
+            inject: { setHeaders: headers },
+          });
+          await push();
+        },
+        async defer(host: string, handler: NetworkHandler, id?: string): Promise<void> {
+          const ruleID = id ?? `defer-${current.length}`;
+          current.push({ id: ruleID, match: { host }, action: "defer", handler });
+          await push();
+        },
+      };
+    })(),
+
     async close(): Promise<void> {
       await transport.close();
     },
   };
+}
+
+function toWireRule(r: NetworkRule): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    match: {
+      host: r.match.host ?? "",
+      port: r.match.port ?? 0,
+      method: r.match.method ?? "",
+      path_prefix: r.match.pathPrefix ?? "",
+    },
+    action: r.action,
+  };
+  if (r.id) out.id = r.id;
+  if (r.inject) {
+    const inj: Record<string, unknown> = {};
+    if (r.inject.setHeaders) inj.set_headers = r.inject.setHeaders;
+    if (r.inject.removeHeaders) inj.remove_headers = r.inject.removeHeaders;
+    if (r.inject.setQuery) inj.set_query = r.inject.setQuery;
+    out.inject = inj;
+  }
+  return out;
 }
 
 /**
@@ -565,6 +767,7 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
   if (opts?.cpu) body.cpu = opts.cpu;
   if (opts?.ttl) body.ttl = opts.ttl;
   if (opts?.labels) body.labels = opts.labels;
+  if (opts?.network?.enabled === false) body.network_mode = "off";
 
   const response = await daemonFetch("/sandboxes", {
     method: "POST",
@@ -597,7 +800,16 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
     transport = await negotiateE2E(wsTransport);
   }
 
-  return buildSandbox(sandboxId, transport, daemonFetch, resolved.http, headers);
+  const sbx = buildSandbox(sandboxId, transport, daemonFetch, resolved.http, headers);
+
+  // Install any rules supplied via opts.network.egress before returning. We
+  // do this after construction so the same code path is used as a runtime
+  // intercept() call.
+  if (opts?.network?.egress && opts.network.egress.length > 0) {
+    await sbx.network.intercept(opts.network.egress);
+  }
+
+  return sbx;
 }
 
 /** Connect to an existing sandbox by ID. */

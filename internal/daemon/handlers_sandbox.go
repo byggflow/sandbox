@@ -236,8 +236,20 @@ func (d *Daemon) handleSandboxWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start proxy session and atomically swap with any existing session.
+	// Start proxy session with hooks that handle:
+	//   - agent->daemon: OpNetEgress, OpNetCertLeaf
+	//   - client->daemon: OpNetRulesSet (always); OpNetFetch (only when rules
+	//     are registered, decided at claim time so binary-bodied methods
+	//     are never intercepted)
+	// Hooks are installed after construction so they can close over the
+	// session and call back into it (needed for OpNetDefer).
 	session := proxy.NewSession(ws, agent, d.Log.With("sandbox", sbxID))
+	session.SetHooks(proxy.Hooks{
+		AgentRequest:         d.makeAgentRequestHandler(sbxID, session),
+		AgentRequestMethods:  agentLocalMethods,
+		ClientRequest:        d.makeClientRequestHandler(sbxID, session),
+		ClientRequestMethods: d.clientLocalMethodsFor(sbxID),
+	})
 	oldSession := sbx.SetSession(session)
 	if oldSession != nil {
 		d.Log.Info("replacing existing session", "sandbox", sbxID)

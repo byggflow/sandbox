@@ -131,6 +131,92 @@ func (a *AgentConn) Ping(timeout time.Duration) error {
 	return nil
 }
 
+// Bootstrap performs the one-time handshake that swaps the boot-time
+// nonce for the long-lived auth token. Used by the runtime's readiness
+// loop on the first connection to a freshly-started agent.
+//
+// After this returns successfully, subsequent connections should use
+// Authenticate(token) instead. The nonce is consumed on the agent side
+// and cannot be replayed.
+func (a *AgentConn) Bootstrap(nonce, token string, timeout time.Duration) error {
+	if err := a.conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("setting bootstrap deadline: %w", err)
+	}
+	defer a.conn.SetDeadline(time.Time{})
+
+	req := protocol.Request{
+		JSONRPC: "2.0",
+		ID:      0,
+		Method:  protocol.OpAuthBootstrap,
+		Params:  map[string]string{"nonce": nonce, "token": token},
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshaling bootstrap request: %w", err)
+	}
+	if err := a.WriteFrame(protocol.FrameJSON, payload); err != nil {
+		return fmt.Errorf("sending bootstrap request: %w", err)
+	}
+
+	frameType, respPayload, err := a.ReadFrame()
+	if err != nil {
+		return fmt.Errorf("reading bootstrap response: %w", err)
+	}
+	if frameType != protocol.FrameJSON {
+		return fmt.Errorf("unexpected bootstrap response frame type: 0x%02x", frameType)
+	}
+
+	var resp protocol.Response
+	if err := json.Unmarshal(respPayload, &resp); err != nil {
+		return fmt.Errorf("decoding bootstrap response: %w", err)
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("agent bootstrap: %s", resp.Error.Message)
+	}
+	return nil
+}
+
+// InstallCA sends an OpNetCAInstall RPC to the agent so it writes the
+// per-sandbox CA certificate to disk. Must be called after Authenticate
+// and before reporting the sandbox as ready.
+func (a *AgentConn) InstallCA(certPEM string, timeout time.Duration) error {
+	if err := a.conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("setting ca install deadline: %w", err)
+	}
+	defer a.conn.SetDeadline(time.Time{})
+
+	req := protocol.Request{
+		JSONRPC: "2.0",
+		ID:      0,
+		Method:  protocol.OpNetCAInstall,
+		Params:  protocol.CAInstallRequest{CertPEM: certPEM},
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshaling ca install request: %w", err)
+	}
+	if err := a.WriteFrame(protocol.FrameJSON, payload); err != nil {
+		return fmt.Errorf("sending ca install request: %w", err)
+	}
+
+	frameType, respPayload, err := a.ReadFrame()
+	if err != nil {
+		return fmt.Errorf("reading ca install response: %w", err)
+	}
+	if frameType != protocol.FrameJSON {
+		return fmt.Errorf("unexpected ca install response frame type: 0x%02x", frameType)
+	}
+
+	var resp protocol.Response
+	if err := json.Unmarshal(respPayload, &resp); err != nil {
+		return fmt.Errorf("decoding ca install response: %w", err)
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("agent ca install: %s", resp.Error.Message)
+	}
+	return nil
+}
+
 // Authenticate sends an auth.token RPC to the agent and verifies the response.
 // Must be called before any other RPC when the agent requires a token.
 func (a *AgentConn) Authenticate(token string, timeout time.Duration) error {
