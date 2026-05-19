@@ -231,7 +231,11 @@ func (d *Daemon) serveSDKFetch(ctx context.Context, sbxID string, deferFn netegr
 		Headers: headers,
 		Body:    encodeBodyForFetch(p.Body),
 	}
-	resp := d.Egress.Handle(ctx, sbxID, req, deferFn)
+	// Legacy net.fetch followed redirects via the agent-side
+	// implementation. Preserve that behavior by opting this request
+	// into the follow-redirects context (the egress proxy path leaves
+	// it off so sandboxes see raw 3xx responses).
+	resp := d.Egress.Handle(netegress.WithFollowRedirects(ctx), sbxID, req, deferFn)
 	body, _ := decodeBase64(resp.Body)
 	// Legacy net.fetch result shape used single-valued headers. Collapse
 	// repeated values with comma joining (correct for most non-cookie

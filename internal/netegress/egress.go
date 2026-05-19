@@ -44,7 +44,16 @@ type Handler struct {
 	caBySbx   map[string]*sandboxca.CA
 	destroyed map[string]struct{}
 
+	// client is for buffered Handle() — has a 60s overall timeout
+	// because the body is read entirely into memory and we don't
+	// want a slow upstream to leak file descriptors.
 	client *http.Client
+
+	// streamClient is for HandleStreaming() — same transport (so the
+	// connection pool is shared), but no overall Timeout. Streaming
+	// responses (SSE, LLM token streams, large downloads) legitimately
+	// run for minutes; cancellation is via the request context.
+	streamClient *http.Client
 
 	// Stats.
 	served atomic.Uint64
@@ -126,20 +135,55 @@ func New() *Handler {
 		ExpectContinueTimeout: 1 * time.Second,
 		DisableCompression:    true, // body is opaque to us; upstream sees Accept-Encoding from sandbox
 	}
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		// Stop following redirects on the daemon side; let the
+		// sandbox client decide. Some clients want to inspect 3xx
+		// themselves. serveSDKFetch flips this via context value to
+		// preserve the legacy follow-redirects behavior of the old
+		// agent-side net.Fetch.
+		if followsRedirects(req.Context()) {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return nil
+		}
+		return http.ErrUseLastResponse
+	}
 	return &Handler{
 		bySandbox: make(map[string]*netrules.Compiled),
 		caBySbx:   make(map[string]*sandboxca.CA),
 		destroyed: make(map[string]struct{}),
 		client: &http.Client{
-			Transport: tr,
-			Timeout:   60 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				// Stop following redirects on the daemon side; let the sandbox
-				// client decide. Some clients want to inspect 3xx themselves.
-				return http.ErrUseLastResponse
-			},
+			Transport:     tr,
+			Timeout:       60 * time.Second,
+			CheckRedirect: checkRedirect,
+		},
+		streamClient: &http.Client{
+			Transport:     tr,
+			// No Timeout — streaming bodies legitimately run for
+			// minutes (SSE, LLM token streams, large downloads).
+			// Cancellation is via the request context.
+			CheckRedirect: checkRedirect,
 		},
 	}
+}
+
+// followRedirectsKey is the per-request context value that opts the
+// CheckRedirect into following 3xx. Used by serveSDKFetch to preserve
+// the legacy net.fetch behavior; the egress proxy path keeps the
+// no-follow default so the sandbox sees raw redirects.
+type followRedirectsKey struct{}
+
+// WithFollowRedirects returns a context that opts the egress dial into
+// following HTTP 3xx redirects (up to 10 hops). Exported so daemon
+// handlers serving the legacy net.fetch RPC preserve the old
+// agent-side follow-redirects behavior.
+func WithFollowRedirects(ctx context.Context) context.Context {
+	return context.WithValue(ctx, followRedirectsKey{}, true)
+}
+func followsRedirects(ctx context.Context) bool {
+	v, _ := ctx.Value(followRedirectsKey{}).(bool)
+	return v
 }
 
 // SetRules replaces the compiled ruleset for a sandbox. Pass nil/zero rules
@@ -333,10 +377,31 @@ func (h *Handler) prepareUpstream(ctx context.Context, sandboxID string, req *pr
 	stripHopByHop(headers)
 	if matched != nil && matched.Action == netrules.ActionInject {
 		for k, v := range matched.Inject.SetHeaders {
-			headers[k] = []string{v}
+			// CRITICAL: remove any existing entries whose canonical
+			// form collides with the inject key. Without this, the
+			// sandbox can suppress an injected credential by sending
+			// the same header in different case (e.g. lowercase
+			// "authorization" alongside our "Authorization") — both
+			// keys live in the map until http.CanonicalHeaderKey
+			// collapses them at write time, and Go's randomized map
+			// iteration order picks which one wins. With the cleanup,
+			// the inject value is guaranteed to be the one that
+			// reaches the upstream.
+			canonK := http.CanonicalHeaderKey(k)
+			for existingK := range headers {
+				if http.CanonicalHeaderKey(existingK) == canonK {
+					delete(headers, existingK)
+				}
+			}
+			headers[canonK] = []string{v}
 		}
 		for _, k := range matched.Inject.RemoveHeaders {
-			delete(headers, k)
+			canonK := http.CanonicalHeaderKey(k)
+			for existingK := range headers {
+				if http.CanonicalHeaderKey(existingK) == canonK {
+					delete(headers, existingK)
+				}
+			}
 		}
 		if len(matched.Inject.SetQuery) > 0 {
 			q := parsed.Query()
@@ -458,7 +523,9 @@ func (h *Handler) HandleStreaming(ctx context.Context, sandboxID string, req *pr
 		return head, copier, nil
 	}
 
-	resp, err := h.client.Do(prep.Req)
+	// Use streamClient (no Timeout) so SSE / long downloads aren't
+	// guillotined at 60s. Cancellation flows via prep.Req.Context().
+	resp, err := h.streamClient.Do(prep.Req)
 	if err != nil {
 		head, copier := syntheticAsStream(synthetic(502, "upstream: "+err.Error()))
 		return head, copier, nil

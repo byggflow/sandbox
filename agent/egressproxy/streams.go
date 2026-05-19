@@ -26,10 +26,27 @@ type streamChunk struct {
 // sandbox client. When the buffer fills, the read loop blocks — that's
 // the backpressure path. WebSocket's TCP underneath provides flow
 // control for the upstream daemon connection.
+//
+// Each entry carries a `done` channel that the release func closes
+// when the HTTP handler tears down its side of the stream (sandbox
+// disconnected, request completed, etc.). deliver selects on done so a
+// blocked send never hangs forever — without this, the agent's read
+// loop could stall the whole daemon connection when one stream's
+// consumer dies mid-flight.
 type streamRegistry struct {
 	mu      sync.Mutex
-	streams map[uint32]chan streamChunk
+	streams map[uint32]*streamEntry
 	nextID  atomic.Uint32
+}
+
+type streamEntry struct {
+	ch       chan streamChunk
+	done     chan struct{}
+	doneOnce sync.Once // guards close(done) — both release() and closeAll() may fire
+}
+
+func (e *streamEntry) closeDone() {
+	e.doneOnce.Do(func() { close(e.done) })
 }
 
 // streamBuffer is the per-stream channel capacity. Each slot is one
@@ -39,40 +56,52 @@ type streamRegistry struct {
 const streamBuffer = 32
 
 func newStreamRegistry() *streamRegistry {
-	return &streamRegistry{streams: make(map[uint32]chan streamChunk)}
+	return &streamRegistry{streams: make(map[uint32]*streamEntry)}
 }
 
 // allocate reserves a fresh stream ID and returns the read-side
-// channel plus a release func the caller must defer.
+// channel plus a release func the caller must defer. release closes
+// the entry's done channel so any deliver currently blocked on the
+// full buffer unblocks immediately.
 func (r *streamRegistry) allocate() (uint32, <-chan streamChunk, func()) {
 	id := r.nextID.Add(1)
-	ch := make(chan streamChunk, streamBuffer)
+	entry := &streamEntry{
+		ch:   make(chan streamChunk, streamBuffer),
+		done: make(chan struct{}),
+	}
 	r.mu.Lock()
-	r.streams[id] = ch
+	r.streams[id] = entry
 	r.mu.Unlock()
-	return id, ch, func() {
-		r.mu.Lock()
-		delete(r.streams, id)
-		r.mu.Unlock()
+	var once sync.Once
+	return id, entry.ch, func() {
+		once.Do(func() {
+			r.mu.Lock()
+			delete(r.streams, id)
+			r.mu.Unlock()
+			entry.closeDone()
+		})
 	}
 }
 
 // deliver routes an inbound chunk to the matching stream. Returns true
-// if a stream was registered for streamID; the caller can log or drop
-// orphan frames.
+// when the chunk was accepted; false when no stream is registered OR
+// when the stream's done channel has been closed (consumer torn down).
+// Selecting on done means a blocked send unblocks immediately when
+// release fires, so the agent's read loop never stalls.
 func (r *streamRegistry) deliver(streamID uint32, chunk streamChunk) bool {
 	r.mu.Lock()
-	ch, ok := r.streams[streamID]
+	entry, ok := r.streams[streamID]
 	r.mu.Unlock()
 	if !ok {
 		return false
 	}
-	// Bounded send. If the consumer is slow we block, providing
-	// backpressure to the connection read loop. The read loop is
-	// per-connection so this only stalls one stream's pacing, not
-	// other streams on the same connection (each has its own channel).
-	ch <- chunk
-	return true
+	select {
+	case entry.ch <- chunk:
+		return true
+	case <-entry.done:
+		// Consumer released; drop the chunk.
+		return false
+	}
 }
 
 // closeAll tears down every active stream so pending readers unblock
@@ -97,11 +126,16 @@ func (r *streamRegistry) deliver(streamID uint32, chunk streamChunk) bool {
 func (r *streamRegistry) closeAll() {
 	r.mu.Lock()
 	streams := r.streams
-	r.streams = make(map[uint32]chan streamChunk)
+	r.streams = make(map[uint32]*streamEntry)
 	r.mu.Unlock()
 
-	for _, ch := range streams {
-		closeWithTerminal(ch, "connection closed")
+	for _, entry := range streams {
+		// Signal release so any deliver blocked on the buffer
+		// unblocks; then push the terminal frame. Both this path and
+		// the release closure (the allocator's defer) may close done
+		// — closeDone's sync.Once serializes them.
+		entry.closeDone()
+		closeWithTerminal(entry.ch, "connection closed")
 	}
 }
 

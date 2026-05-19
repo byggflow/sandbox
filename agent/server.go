@@ -49,15 +49,20 @@ type Server struct {
 // supplied per-connection via egressProxy.SetClient; until the first
 // daemon connection arrives, the proxy responds with 502.
 //
-// Binding lazily inside handleConn (the previous design) created a
-// window between sandbox-ready and listener-ready that user code could
-// hit if it raced ahead of the first daemon connection.
+// The egress proxy is only started when the runtime injected the
+// SANDBOX_EGRESS_PORT (or SANDBOX_EGRESS_ADDR) env var. This makes
+// network_mode=off a true opt-out: the agent doesn't bind 127.0.0.1:8118
+// and doesn't claim a user port the sandbox might want for its own
+// service. Binding lazily inside handleConn (the previous design)
+// created a window between sandbox-ready and listener-ready that user
+// code could hit if it raced ahead of the first daemon connection.
 func (s *Server) startEgressProxy() {
 	addr := os.Getenv("SANDBOX_EGRESS_ADDR")
 	if addr == "" {
 		port := os.Getenv("SANDBOX_EGRESS_PORT")
 		if port == "" {
-			port = "8118"
+			// No egress env from the runtime → opt-out. Don't bind.
+			return
 		}
 		addr = "127.0.0.1:" + port
 	}
@@ -436,10 +441,18 @@ func (s *Server) sendAuthError(conn net.Conn, id int, msg string) {
 	codec.WriteJSON(conn, resp)
 }
 
-// connRW wraps a net.Conn to implement io.ReadWriter.
-// Reads go through the framed protocol (for binary frames expected by handlers).
+// connRW wraps a net.Conn to implement io.ReadWriter with a write
+// mutex. Reads are sequential (one read loop per connection), but
+// writes happen from multiple goroutines: the dispatcher writes
+// JSON-RPC responses, the phonehome client writes outbound RPCs, the
+// streaming-egress copier writes FrameStreamData/End frames, and the
+// auth handlers write Response frames. Each frame must reach the wire
+// as one contiguous byte sequence — without serialization, two
+// concurrent Write calls can interleave at the TCP layer and corrupt
+// the agent protocol on the daemon side.
 type connRW struct {
-	conn net.Conn
+	conn   net.Conn
+	writeM sync.Mutex
 }
 
 func (c *connRW) Read(p []byte) (int, error) {
@@ -447,5 +460,7 @@ func (c *connRW) Read(p []byte) (int, error) {
 }
 
 func (c *connRW) Write(p []byte) (int, error) {
+	c.writeM.Lock()
+	defer c.writeM.Unlock()
 	return c.conn.Write(p)
 }

@@ -607,16 +607,47 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
       // mutate the handlers map.
       transport.onRequest(async (method, params) => {
         if (method !== "net.defer") return undefined;
-        const p = params as { rule_id: string; request: DeferredRequest };
+        // The wire format encodes headers as map[string][]string
+        // (matches RFC 7230 multi-value semantics, needed for
+        // Set-Cookie etc). The user-facing handler API uses
+        // Record<string, string>, so collapse on the way in and
+        // expand on the way out — without these conversions, any
+        // header on the returned request/response fails the daemon's
+        // JSON unmarshal into the wire type and the defer call comes
+        // back as a 502.
+        const p = params as {
+          rule_id: string;
+          request: { method: string; url: string; headers?: Record<string, string[]>; body?: string };
+        };
         const fn = handlers.get(p.rule_id);
         if (!fn) {
           throw new Error(`no handler registered for rule ${p.rule_id}`);
         }
-        const result = await fn(p.request);
+        const reqIn: DeferredRequest = {
+          method: p.request.method,
+          url: p.request.url,
+          headers: collapseHeaders(p.request.headers),
+          body: p.request.body ?? "",
+        };
+        const result = await fn(reqIn);
         if ("response" in result && result.response) {
-          return { response: result.response };
+          return {
+            response: {
+              status: result.response.status,
+              headers: expandHeaders(result.response.headers),
+              body: result.response.body ?? "",
+            },
+          };
         }
-        return { request: (result as { request: DeferredRequest }).request };
+        const reqOut = (result as { request: DeferredRequest }).request;
+        return {
+          request: {
+            method: reqOut.method,
+            url: reqOut.url,
+            headers: expandHeaders(reqOut.headers),
+            body: reqOut.body ?? "",
+          },
+        };
       });
 
       const push = async () => {
@@ -667,6 +698,34 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
       await transport.close();
     },
   };
+}
+
+// expandHeaders converts the SDK's user-facing single-value header map
+// into the wire-format multi-value shape (map[string][]string) the
+// daemon expects when unmarshalling DeferResponse.Request/Response.
+function expandHeaders(h?: Record<string, string>): Record<string, string[]> | undefined {
+  if (!h) return undefined;
+  const out: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(h)) {
+    out[k] = [v];
+  }
+  return out;
+}
+
+// collapseHeaders inverts expandHeaders: takes the wire-format
+// multi-value shape and produces a single-value Record for the user's
+// handler. Joins repeated values with comma per HTTP convention; not
+// strictly correct for Set-Cookie but defer requests rarely carry
+// multiple of those.
+function collapseHeaders(h?: Record<string, string[]>): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!h) return out;
+  for (const [k, vs] of Object.entries(h)) {
+    if (vs && vs.length > 0) {
+      out[k] = vs.join(", ");
+    }
+  }
+  return out;
 }
 
 function toWireRule(r: NetworkRule): Record<string, unknown> {

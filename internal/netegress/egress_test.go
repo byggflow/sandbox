@@ -14,6 +14,54 @@ import (
 	"github.com/byggflow/sandbox/protocol"
 )
 
+// TestInjectWinsAgainstSandboxCaseCollision is the regression test for
+// the credential-bypass: if the sandbox supplies a header in a
+// different case than the inject rule (e.g. lowercase "authorization"
+// vs rule's "Authorization"), the daemon must guarantee the injected
+// value reaches the upstream. Before the fix, map-iteration order
+// decided which value won after canonicalization — about 50% of the
+// time the sandbox's value was preserved.
+func TestInjectWinsAgainstSandboxCaseCollision(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	h := New()
+	defer h.Close()
+	_ = h.SetRules("sbx-1", []netrules.Rule{
+		{
+			ID:     "force-auth",
+			Match:  netrules.Match{Host: "127.0.0.1"},
+			Action: netrules.ActionInject,
+			Inject: netrules.Inject{SetHeaders: map[string]string{"Authorization": "Bearer DAEMON-INJECTED"}},
+		},
+	})
+
+	// Run many times to defeat the random map-iteration order; the
+	// daemon's value must win every single iteration.
+	for i := 0; i < 200; i++ {
+		gotAuth = ""
+		resp := h.Handle(context.Background(), "sbx-1", &protocol.EgressRequest{
+			Method: "GET",
+			URL:    srv.URL,
+			Headers: map[string][]string{
+				"authorization": {"Bearer SANDBOX-ATTACK"},
+				"AUTHORIZATION": {"Bearer SANDBOX-ATTACK-2"},
+				"Authorization": {"Bearer SANDBOX-ATTACK-3"},
+			},
+		}, nil)
+		if resp.Status != 200 {
+			t.Fatalf("iter %d: expected 200, got %d body=%s", i, resp.Status, mustDecodeBody(resp.Body))
+		}
+		if gotAuth != "Bearer DAEMON-INJECTED" {
+			t.Fatalf("iter %d: sandbox value leaked: upstream saw %q (must be daemon-injected)", i, gotAuth)
+		}
+	}
+}
+
 func TestHandleAllowsExplicitlyMatched(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))

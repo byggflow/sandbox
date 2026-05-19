@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -260,32 +261,117 @@ func (n *NetCategory) pushRules(ctx context.Context, rules []NetworkRule) error 
 // dispatchDefer is the IncomingRequestHandler installed on the transport.
 // Looks up the rule's handler by ID, invokes it, and shapes the result for
 // the daemon's DeferResponse.
+//
+// The wire format encodes headers as map[string][]string (matches
+// RFC 7230 multi-value semantics, needed for Set-Cookie etc) while
+// the user-facing handler API uses map[string]string. Collapse on the
+// way in and expand on the way out — without these conversions, any
+// header on the returned request/response fails the daemon's JSON
+// unmarshal into the wire type and the defer call returns 502.
 func (n *NetCategory) dispatchDefer(ctx context.Context, method string, params json.RawMessage) (interface{}, error) {
 	if method != "net.defer" {
 		return nil, nil
 	}
-	var req struct {
-		RuleID  string          `json:"rule_id"`
-		Request DeferredRequest `json:"request"`
+	var wire struct {
+		RuleID  string `json:"rule_id"`
+		Request struct {
+			Method  string              `json:"method"`
+			URL     string              `json:"url"`
+			Headers map[string][]string `json:"headers,omitempty"`
+			Body    string              `json:"body,omitempty"`
+		} `json:"request"`
 	}
-	if err := json.Unmarshal(params, &req); err != nil {
-		return nil, fmt.Errorf("sandbox: decode defer request: %w", err)
+	if err := json.Unmarshal(params, &wire); err != nil {
+		return nil, fmt.Errorf("decoding defer request: %w", err)
 	}
+
+	req := DeferredRequest{
+		Method:  wire.Request.Method,
+		URL:     wire.Request.URL,
+		Headers: collapseHeadersGo(wire.Request.Headers),
+		Body:    wire.Request.Body,
+	}
+
 	n.rulesMu.Lock()
-	h := n.handlers[req.RuleID]
+	h := n.handlers[wire.RuleID]
 	n.rulesMu.Unlock()
 	if h == nil {
-		return nil, fmt.Errorf("sandbox: no handler for rule %s", req.RuleID)
+		return nil, fmt.Errorf("no handler for rule %s", wire.RuleID)
 	}
-	result, err := h(ctx, &req.Request)
+
+	result, err := h(ctx, &req)
 	if err != nil {
 		return nil, err
 	}
-	if result == nil {
-		// Treat as no-op: return the original request.
-		return DeferResult{Request: &req.Request}, nil
+
+	// Build a wire-shape result with map[string][]string headers.
+	type wireRequest struct {
+		Method  string              `json:"method"`
+		URL     string              `json:"url"`
+		Headers map[string][]string `json:"headers,omitempty"`
+		Body    string              `json:"body,omitempty"`
 	}
-	return result, nil
+	type wireResponse struct {
+		Status  int                 `json:"status"`
+		Headers map[string][]string `json:"headers,omitempty"`
+		Body    string              `json:"body,omitempty"`
+	}
+	type wireResult struct {
+		Request  *wireRequest  `json:"request,omitempty"`
+		Response *wireResponse `json:"response,omitempty"`
+	}
+
+	if result == nil {
+		// Treat as no-op: return the original (already-wire-shaped) request.
+		return wireResult{Request: &wireRequest{
+			Method: wire.Request.Method, URL: wire.Request.URL,
+			Headers: wire.Request.Headers, Body: wire.Request.Body,
+		}}, nil
+	}
+	if result.Response != nil {
+		return wireResult{Response: &wireResponse{
+			Status:  result.Response.Status,
+			Headers: expandHeadersGo(result.Response.Headers),
+			Body:    result.Response.Body,
+		}}, nil
+	}
+	if result.Request != nil {
+		return wireResult{Request: &wireRequest{
+			Method:  result.Request.Method,
+			URL:     result.Request.URL,
+			Headers: expandHeadersGo(result.Request.Headers),
+			Body:    result.Request.Body,
+		}}, nil
+	}
+	// Both nil; behave like the no-op path.
+	return wireResult{Request: &wireRequest{
+		Method: wire.Request.Method, URL: wire.Request.URL,
+		Headers: wire.Request.Headers, Body: wire.Request.Body,
+	}}, nil
+}
+
+func expandHeadersGo(h map[string]string) map[string][]string {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(h))
+	for k, v := range h {
+		out[k] = []string{v}
+	}
+	return out
+}
+
+func collapseHeadersGo(h map[string][]string) map[string]string {
+	if len(h) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(h))
+	for k, vs := range h {
+		if len(vs) > 0 {
+			out[k] = strings.Join(vs, ", ")
+		}
+	}
+	return out
 }
 
 // Fetch makes an HTTP request from inside the sandbox.

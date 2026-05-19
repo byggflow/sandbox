@@ -38,20 +38,39 @@ func TestDispatchDeferRoutesByRuleID(t *testing.T) {
 		},
 	}
 
+	// The wire shape uses map[string][]string for headers (matches the
+	// daemon's protocol.DeferResponse). dispatchDefer collapses that
+	// into the user-facing map[string]string before invoking the
+	// handler, and expands the handler's return back to multi-value
+	// before returning to the daemon.
 	params, _ := json.Marshal(map[string]interface{}{
 		"rule_id": "r1",
-		"request": DeferredRequest{Method: "GET", URL: "https://x.test/"},
+		"request": map[string]interface{}{
+			"method":  "GET",
+			"url":     "https://x.test/",
+			"headers": map[string][]string{"Existing": {"value"}},
+		},
 	})
 	result, err := n.dispatchDefer(context.Background(), "net.defer", params)
 	if err != nil {
 		t.Fatalf("dispatchDefer: %v", err)
 	}
-	dr, ok := result.(*DeferResult)
-	if !ok {
-		t.Fatalf("expected *DeferResult, got %T", result)
+	// The returned result is the wire shape (not *DeferResult), so
+	// re-marshal+inspect via JSON.
+	resultJSON, _ := json.Marshal(result)
+	var wire struct {
+		Request *struct {
+			Headers map[string][]string `json:"headers"`
+		} `json:"request"`
 	}
-	if dr.Request == nil || dr.Request.Headers["X-Test"] != "ok" {
-		t.Errorf("handler did not run: %+v", dr)
+	if err := json.Unmarshal(resultJSON, &wire); err != nil {
+		t.Fatalf("decode wire result: %v", err)
+	}
+	if wire.Request == nil {
+		t.Fatal("expected request in wire result")
+	}
+	if got := wire.Request.Headers["X-Test"]; len(got) != 1 || got[0] != "ok" {
+		t.Errorf("handler mutation lost; X-Test=%v", got)
 	}
 }
 
