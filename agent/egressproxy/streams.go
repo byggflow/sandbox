@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // streamChunk is one frame's worth of body bytes for a stream, or the
@@ -74,21 +75,55 @@ func (r *streamRegistry) deliver(streamID uint32, chunk streamChunk) bool {
 	return true
 }
 
-// closeAll is called on agent connection teardown so any pending
-// stream readers unblock with an error.
+// closeAll tears down every active stream so pending readers unblock
+// with a clear "connection closed" error rather than hanging on a
+// channel that will never receive an end marker.
+//
+// The old implementation used a single non-blocking send for the
+// terminal frame and silently dropped it whenever the channel buffer
+// was full — and never closed the channel — which left the HTTP proxy
+// handler stuck in `for chunk := range ch` waiting for an end marker
+// that would never arrive.
+//
+// The current implementation does a blocking send for the terminal
+// marker (so previously-buffered chunks still reach the consumer)
+// with a short timeout to bound the worst case, then closes the
+// channel so even a missed marker exits the range loop on EOF.
+//
+// Safe to call without a concurrent producer — the agent invokes this
+// in the handleConn defer, after the read loop (the only producer)
+// has exited. The consumer (HTTP proxy handler) is responsible for
+// draining the channel, which it does naturally via `for ... range`.
 func (r *streamRegistry) closeAll() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	for id, ch := range r.streams {
-		// Drain non-blocking attempts then send terminal error so
-		// readers see "connection closed".
-		select {
-		case ch <- streamChunk{end: true, errMsg: "connection closed"}:
-		default:
-		}
-		delete(r.streams, id)
+	streams := r.streams
+	r.streams = make(map[uint32]chan streamChunk)
+	r.mu.Unlock()
+
+	for _, ch := range streams {
+		closeWithTerminal(ch, "connection closed")
 	}
 }
+
+// closeWithTerminal sends an end marker (blocking with a deadline so
+// previously-buffered chunks can drain) then closes the channel. The
+// timeout bounds the worst case where the consumer goroutine is
+// already dead — without it we'd leak.
+func closeWithTerminal(ch chan streamChunk, errMsg string) {
+	select {
+	case ch <- streamChunk{end: true, errMsg: errMsg}:
+	case <-time.After(closeAllTimeout):
+		// Consumer didn't make room in time. The close below still
+		// breaks the range loop; the error message is lost but the
+		// consumer at least unblocks.
+	}
+	close(ch)
+}
+
+// closeAllTimeout caps how long we wait for a busy consumer to drain
+// enough buffer for the terminal frame. 100ms is generous for any
+// realistic HTTP-handler loop and bounds the agent shutdown cost.
+const closeAllTimeout = 100 * time.Millisecond
 
 // ErrStreamClosed is returned when the registry tears down before the
 // upstream finishes.

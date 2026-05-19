@@ -369,19 +369,37 @@ func (m *Manager) createWarm(ctx context.Context, image, profile string, memory 
 		return nil, fmt.Errorf("runtime %q not available", runtimeName)
 	}
 
-	// Generate auth token for this warm container.
+	// Generate the long-lived auth token AND a single-use bootstrap
+	// nonce. The runtime delivers the nonce to the guest via env /
+	// kernel cmdline; the readiness loop then trades the nonce for the
+	// long-lived token over the agent connection (nonce-bootstrap
+	// pattern, see agent/server.go). Without the nonce here, the env
+	// builder emits no auth credential at all and the agent starts in
+	// single-user mode, which makes the daemon's auth.token call fail.
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
-		return nil, fmt.Errorf("generate auth token: %w", err)
+		return nil, fmt.Errorf("generating auth token: %w", err)
 	}
 	authToken := hex.EncodeToString(tokenBytes)
 
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return nil, fmt.Errorf("generating bootstrap nonce: %w", err)
+	}
+	authBootstrap := hex.EncodeToString(nonceBytes)
+
 	inst, err := rt.Create(ctx, runtime.CreateOpts{
-		Image:     image,
-		Memory:    memory,
-		CPU:       cpu,
-		Storage:   storage,
-		AuthToken: authToken,
+		Image:         image,
+		Memory:        memory,
+		CPU:           cpu,
+		Storage:       storage,
+		AuthToken:     authToken,
+		AuthBootstrap: authBootstrap,
+		// Warm containers are always created with the egress proxy
+		// wired up — we can't add HTTP_PROXY env vars to a running
+		// container later, and the daemon's CreateSandbox skips the
+		// pool when NetworkMode=off (cold-start instead).
+		EgressProxy: true,
 		Labels: map[string]string{
 			"sandboxd.pool":    "warm",
 			"sandboxd.profile": profile,

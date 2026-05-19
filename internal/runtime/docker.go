@@ -183,17 +183,24 @@ func (r *DockerRuntime) Create(ctx context.Context, opts CreateOpts) (*Instance,
 	// single-use nonce for the long-lived token; after this point the
 	// nonce is consumed agent-side and the daemon authenticates with
 	// the token on all subsequent connections.
+	// bootstrapped flips to true on the first successful auth.bootstrap
+	// call — the agent has consumed the nonce at that point, so any
+	// retry must use auth.token against the now-installed long-lived
+	// token rather than another bootstrap attempt (which would fail
+	// with "bootstrap unavailable" and brick the readiness loop).
+	bootstrapped := false
 	var lastErr error
 	for attempt := 0; attempt < 30; attempt++ {
 		agent, dialErr := proxy.Dial(agentAddr, 2*time.Second)
 		if dialErr == nil {
-			if opts.AuthBootstrap != "" && opts.AuthToken != "" {
+			if opts.AuthBootstrap != "" && opts.AuthToken != "" && !bootstrapped {
 				if bootErr := agent.Bootstrap(opts.AuthBootstrap, opts.AuthToken, 2*time.Second); bootErr != nil {
 					agent.Close()
 					lastErr = bootErr
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
+				bootstrapped = true
 			} else if opts.AuthToken != "" {
 				if authErr := agent.Authenticate(opts.AuthToken, 2*time.Second); authErr != nil {
 					agent.Close()

@@ -367,8 +367,11 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	// Record creation frequency.
 	d.Pool.RecordCreation(image)
 
-	// Try to claim a warm container (only if not using a template image).
-	if templateID == "" {
+	// Try to claim a warm container (only if not using a template image
+	// and not opting out of network middleware — warm containers are
+	// pre-baked with HTTP_PROXY env, which is incompatible with
+	// NetworkMode=off; force a cold start in that case).
+	if templateID == "" && req.NetworkMode != "off" {
 		warm, ok := d.Pool.Claim(image)
 		if ok {
 			sbx := &Sandbox{

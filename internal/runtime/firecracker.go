@@ -230,18 +230,23 @@ func (r *FirecrackerRuntime) Create(ctx context.Context, opts CreateOpts) (*Inst
 	// Wait for agent to become reachable via vsock. Bootstrap trades
 	// the single-use nonce (delivered via kernel cmdline) for the
 	// long-lived token, which the agent stores in process memory only.
+	// After the first successful Bootstrap, retries MUST switch to
+	// auth.token — the nonce is consumed and another bootstrap would
+	// fail with "bootstrap unavailable", bricking the readiness loop.
+	bootstrapped := false
 	var lastErr error
 	for attempt := 0; attempt < 30; attempt++ {
 		conn, dialErr := r.dialVsock(cid, 9111, 2*time.Second)
 		if dialErr == nil {
 			agent := proxy.Wrap(conn)
-			if opts.AuthBootstrap != "" && opts.AuthToken != "" {
+			if opts.AuthBootstrap != "" && opts.AuthToken != "" && !bootstrapped {
 				if bootErr := agent.Bootstrap(opts.AuthBootstrap, opts.AuthToken, 2*time.Second); bootErr != nil {
 					agent.Close()
 					lastErr = bootErr
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
+				bootstrapped = true
 			} else if opts.AuthToken != "" {
 				if authErr := agent.Authenticate(opts.AuthToken, 2*time.Second); authErr != nil {
 					agent.Close()
