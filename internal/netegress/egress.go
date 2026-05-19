@@ -250,22 +250,33 @@ type StreamSink interface {
 	End(status byte, errMsg string) error
 }
 
-// Handle applies the sandbox's rules to req and dials upstream. The returned
-// EgressResponse always has a meaningful Status — transport errors are
-// rendered as 502 Bad Gateway with the error in the body.
-//
-// When a matched rule has Action == ActionDefer and deferFn is non-nil, the
-// daemon calls deferFn to obtain the SDK's modified request or synthetic
-// response. Pass nil deferFn to treat defer matches as plain allow.
-func (h *Handler) Handle(ctx context.Context, sandboxID string, req *protocol.EgressRequest, deferFn DeferFunc) *protocol.EgressResponse {
-	h.served.Add(1)
+// prepResult is the output of prepareUpstream. Exactly one of Req or
+// Synthetic is non-nil. MatchedID is the rule that fired (empty when
+// no rule matched).
+type prepResult struct {
+	Req       *http.Request
+	Synthetic *protocol.EgressResponse
+	MatchedID string
+}
 
+// prepareUpstream is the shared "from EgressRequest to *http.Request"
+// path used by both Handle and HandleStreaming. It parses the URL,
+// looks up the matching rule, applies deny/defer/inject, runs the
+// private-host fast-path, builds the outbound headers, and returns a
+// request that's ready to hand to h.client.Do. When a rule short-
+// circuits (deny, defer-stub, defer-error, body decode error,
+// private-host block) Synthetic is set instead and the caller returns
+// it directly.
+//
+// Behavior is bit-for-bit equivalent to the inlined versions that
+// previously lived in Handle and HandleStreaming.
+func (h *Handler) prepareUpstream(ctx context.Context, sandboxID string, req *protocol.EgressRequest, deferFn DeferFunc) prepResult {
 	parsed, err := url.Parse(req.URL)
 	if err != nil {
-		return synthetic(400, "invalid url: "+err.Error())
+		return prepResult{Synthetic: synthetic(400, "invalid url: "+err.Error())}
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return synthetic(400, "unsupported scheme: "+parsed.Scheme)
+		return prepResult{Synthetic: synthetic(400, "unsupported scheme: "+parsed.Scheme)}
 	}
 
 	port := portFromURL(parsed)
@@ -284,29 +295,29 @@ func (h *Handler) Handle(ctx context.Context, sandboxID string, req *protocol.Eg
 		h.denied.Add(1)
 		resp := synthetic(403, "blocked by egress rule "+matched.ID)
 		resp.MatchedRuleID = matched.ID
-		return resp
+		return prepResult{Synthetic: resp, MatchedID: matched.ID}
 	}
 
-	// Defer to the SDK handler if the matched rule asks for it.
+	// Defer to the SDK handler if the matched rule asks for it. The
+	// handler can either return a synthetic response (short-circuit)
+	// or a modified request that we continue dialing with.
 	if matched != nil && matched.Action == netrules.ActionDefer && deferFn != nil {
 		dResp, err := deferFn(ctx, matched.ID, req)
 		if err != nil {
 			out := synthetic(502, "defer handler: "+err.Error())
 			out.MatchedRuleID = matched.ID
-			return out
+			return prepResult{Synthetic: out, MatchedID: matched.ID}
 		}
 		if dResp != nil && dResp.Response != nil {
-			// Short-circuit: SDK returned a synthetic response.
 			dResp.Response.MatchedRuleID = matched.ID
 			dResp.Response.Synthetic = true
-			return dResp.Response
+			return prepResult{Synthetic: dResp.Response, MatchedID: matched.ID}
 		}
 		if dResp != nil && dResp.Request != nil {
-			// Continue with the SDK-modified request.
 			req = dResp.Request
 			parsed, err = url.Parse(req.URL)
 			if err != nil {
-				return synthetic(400, "defer handler returned invalid url: "+err.Error())
+				return prepResult{Synthetic: synthetic(400, "defer handler returned invalid url: "+err.Error()), MatchedID: matched.ID}
 			}
 			method = strings.ToUpper(req.Method)
 			if method == "" {
@@ -316,8 +327,8 @@ func (h *Handler) Handle(ctx context.Context, sandboxID string, req *protocol.Eg
 	}
 
 	// Build the outbound headers: clone the inbound, drop hop-by-hop
-	// (these are scoped to the sandbox<->agent hop and would corrupt the
-	// upstream's connection semantics), then apply inject mutations.
+	// (these are scoped to the sandbox<->agent hop), then apply inject
+	// mutations.
 	headers := cloneHeaders(req.Headers)
 	stripHopByHop(headers)
 	if matched != nil && matched.Action == netrules.ActionInject {
@@ -336,42 +347,60 @@ func (h *Handler) Handle(ctx context.Context, sandboxID string, req *protocol.Eg
 		}
 	}
 
-	// Fast-path: refuse URLs that hardcode a private IP literal, before
-	// we waste a DNS lookup or socket on them. The dialer below ALSO
-	// enforces this against resolved IPs (DNS-rebinding defense); this
-	// block just gives a clearer synthetic error for the literal case.
+	// Fast-path: refuse URLs that hardcode a private IP literal. The
+	// dialer also enforces this against resolved IPs (DNS-rebinding
+	// defense); this block gives a clearer synthetic error.
 	// Skipped when a rule matched — operator opted in.
 	if matched == nil && isPrivateHost(parsed.Hostname()) {
-		return synthetic(403, "egress to private address blocked")
+		return prepResult{Synthetic: synthetic(403, "egress to private address blocked")}
 	}
 
 	body, err := decodeBody(req.Body)
 	if err != nil {
-		return synthetic(400, "invalid body encoding: "+err.Error())
+		return prepResult{Synthetic: synthetic(400, "invalid body encoding: "+err.Error())}
 	}
 
-	// The dialer ALWAYS resolves the hostname and refuses private IPs
-	// unless this context is marked allow-private. A matched rule is
-	// the only thing that flips the bit; otherwise an attacker-controlled
-	// hostname that resolves to 169.254.169.254 gets blocked at dial.
+	// Allow-private is per-request, scoped to matched rules only, so
+	// DNS-rebinding via a hostname pointed at 169.254.169.254 cannot
+	// reach IMDS unless an operator-installed rule already authorized.
 	reqCtx := ctx
 	if matched != nil {
 		reqCtx = withAllowPrivate(ctx)
 	}
 	httpReq, err := http.NewRequestWithContext(reqCtx, method, parsed.String(), bytes.NewReader(body))
 	if err != nil {
-		return synthetic(400, "building request: "+err.Error())
+		return prepResult{Synthetic: synthetic(400, "building request: "+err.Error())}
 	}
 	for k, vs := range headers {
-		// Use Header[k] = vs rather than Set/Add so the canonical-case
-		// form chosen by the stdlib gets the multi-value list intact.
 		httpReq.Header[http.CanonicalHeaderKey(k)] = append([]string(nil), vs...)
 	}
 	if hs, ok := headers["Host"]; ok && len(hs) > 0 {
 		httpReq.Host = hs[0]
 	}
 
-	resp, err := h.client.Do(httpReq)
+	matchedID := ""
+	if matched != nil {
+		matchedID = matched.ID
+	}
+	return prepResult{Req: httpReq, MatchedID: matchedID}
+}
+
+// Handle applies the sandbox's rules to req and dials upstream. The returned
+// EgressResponse always has a meaningful Status — transport errors are
+// rendered as 502 Bad Gateway with the error in the body.
+//
+// When a matched rule has Action == ActionDefer and deferFn is non-nil, the
+// daemon calls deferFn to obtain the SDK's modified request or synthetic
+// response. Pass nil deferFn to treat defer matches as plain allow.
+func (h *Handler) Handle(ctx context.Context, sandboxID string, req *protocol.EgressRequest, deferFn DeferFunc) *protocol.EgressResponse {
+	h.served.Add(1)
+
+	prep := h.prepareUpstream(ctx, sandboxID, req, deferFn)
+	if prep.Synthetic != nil {
+		return prep.Synthetic
+	}
+
+	resp, err := h.client.Do(prep.Req)
 	if err != nil {
 		return synthetic(502, "upstream: "+err.Error())
 	}
@@ -399,182 +428,52 @@ func (h *Handler) Handle(ctx context.Context, sandboxID string, req *protocol.Eg
 		outHeaders[k] = append([]string(nil), vs...)
 	}
 
-	out := &protocol.EgressResponse{
-		Status:  resp.StatusCode,
-		Headers: outHeaders,
-		Body:    base64.StdEncoding.EncodeToString(respBody),
+	return &protocol.EgressResponse{
+		Status:        resp.StatusCode,
+		Headers:       outHeaders,
+		Body:          base64.StdEncoding.EncodeToString(respBody),
+		MatchedRuleID: prep.MatchedID,
 	}
-	if matched != nil {
-		out.MatchedRuleID = matched.ID
-	}
-	return out
 }
 
 // HandleStreaming is the streaming counterpart of Handle. It applies
-// rules, dials upstream, returns the response headers as soon as they
-// arrive, and spawns a goroutine that copies the body to sink in
-// StreamChunkSize-bounded pieces.
+// rules (via the shared prepareUpstream), dials upstream, returns the
+// response headers as soon as they arrive, and returns a BodyCopier
+// that streams the body to a sink in StreamChunkSize-bounded chunks.
 //
-// On a denied / synthetic / inject-only path the head is returned with
-// a complete body that hasn't been streamed yet; the caller should call
-// sink.WriteChunk + sink.End themselves. (The simpler integration: emit
-// the head, then emit one chunk + clean End.)
+// On synthetic short-circuits (deny, defer-stub, defer-error, private-
+// host block, body decode error) the head + copier still describe a
+// well-formed response — the copier emits the synthetic body as a
+// single chunk and then a clean End.
 //
-// Returns the streaming header view plus a function the caller invokes
-// to start copying the body. The body copy is synchronous on whatever
-// goroutine calls it; pass it to a separate goroutine if you want the
-// RPC response to return before the body finishes.
+// The body copy is synchronous on whatever goroutine calls the copier;
+// the daemon's session handler runs it in its own goroutine so the RPC
+// response (the head) returns to the agent before the body finishes.
 func (h *Handler) HandleStreaming(ctx context.Context, sandboxID string, req *protocol.EgressRequest, deferFn DeferFunc) (*protocol.StreamEgressResponse, BodyCopier, error) {
 	h.served.Add(1)
 
-	parsed, err := url.Parse(req.URL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid url: %w", err)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, nil, fmt.Errorf("unsupported scheme: %s", parsed.Scheme)
-	}
-
-	port := portFromURL(parsed)
-	method := strings.ToUpper(req.Method)
-	if method == "" {
-		method = "GET"
-	}
-
-	rules := h.Rules(sandboxID)
-	var matched *netrules.Rule
-	if rules != nil {
-		matched = rules.Match(parsed.Hostname(), port, method, parsed.Path)
-	}
-
-	// Synthetic / deny / defer-short-circuit paths still produce a full
-	// in-memory body. Convert to the streaming shape by emitting a single
-	// chunk + clean end in the BodyCopier closure.
-	syntheticEarly := func(status int, msg string) (*protocol.StreamEgressResponse, BodyCopier, error) {
-		head := &protocol.StreamEgressResponse{
-			Status:    status,
-			Headers:   map[string][]string{"Content-Type": {"text/plain; charset=utf-8"}},
-			Synthetic: true,
-		}
-		if matched != nil {
-			head.MatchedRuleID = matched.ID
-		}
-		body := []byte(msg)
-		copier := func(sink StreamSink) error {
-			if err := sink.WriteChunk(body); err != nil {
-				return err
-			}
-			return sink.End(protocol.StreamEndOK, "")
-		}
+	prep := h.prepareUpstream(ctx, sandboxID, req, deferFn)
+	if prep.Synthetic != nil {
+		head, copier := syntheticAsStream(prep.Synthetic)
 		return head, copier, nil
 	}
 
-	if matched != nil && matched.Action == netrules.ActionDeny {
-		h.denied.Add(1)
-		return syntheticEarly(403, "blocked by egress rule "+matched.ID)
-	}
-
-	if matched != nil && matched.Action == netrules.ActionDefer && deferFn != nil {
-		dResp, err := deferFn(ctx, matched.ID, req)
-		if err != nil {
-			return syntheticEarly(502, "defer handler: "+err.Error())
-		}
-		if dResp != nil && dResp.Response != nil {
-			head := &protocol.StreamEgressResponse{
-				Status:        dResp.Response.Status,
-				Headers:       dResp.Response.Headers,
-				MatchedRuleID: matched.ID,
-				Synthetic:     true,
-			}
-			body, _ := decodeBody(dResp.Response.Body)
-			copier := func(sink StreamSink) error {
-				if len(body) > 0 {
-					if err := sink.WriteChunk(body); err != nil {
-						return err
-					}
-				}
-				return sink.End(protocol.StreamEndOK, "")
-			}
-			return head, copier, nil
-		}
-		if dResp != nil && dResp.Request != nil {
-			req = dResp.Request
-			parsed, err = url.Parse(req.URL)
-			if err != nil {
-				return syntheticEarly(400, "defer handler returned invalid url: "+err.Error())
-			}
-			method = strings.ToUpper(req.Method)
-			if method == "" {
-				method = "GET"
-			}
-		}
-	}
-
-	headers := cloneHeaders(req.Headers)
-	stripHopByHop(headers)
-	if matched != nil && matched.Action == netrules.ActionInject {
-		for k, v := range matched.Inject.SetHeaders {
-			headers[k] = []string{v}
-		}
-		for _, k := range matched.Inject.RemoveHeaders {
-			delete(headers, k)
-		}
-		if len(matched.Inject.SetQuery) > 0 {
-			q := parsed.Query()
-			for k, v := range matched.Inject.SetQuery {
-				q.Set(k, v)
-			}
-			parsed.RawQuery = q.Encode()
-		}
-	}
-
-	// Fast-path: refuse URLs that hardcode a private IP literal. Dialer
-	// also enforces against resolved IPs below; this is the early exit.
-	if matched == nil && isPrivateHost(parsed.Hostname()) {
-		return syntheticEarly(403, "egress to private address blocked")
-	}
-
-	body, err := decodeBody(req.Body)
+	resp, err := h.client.Do(prep.Req)
 	if err != nil {
-		return syntheticEarly(400, "invalid body encoding: "+err.Error())
-	}
-
-	// Allow-private bit is per-request, scoped to matched rules only,
-	// so DNS-rebinding via a hostname pointed at 169.254.169.254 cannot
-	// reach IMDS unless an operator-installed rule already authorized
-	// the URL.
-	reqCtx := ctx
-	if matched != nil {
-		reqCtx = withAllowPrivate(ctx)
-	}
-	httpReq, err := http.NewRequestWithContext(reqCtx, method, parsed.String(), bytes.NewReader(body))
-	if err != nil {
-		return syntheticEarly(400, "building request: "+err.Error())
-	}
-	for k, vs := range headers {
-		httpReq.Header[http.CanonicalHeaderKey(k)] = append([]string(nil), vs...)
-	}
-	if hs, ok := headers["Host"]; ok && len(hs) > 0 {
-		httpReq.Host = hs[0]
-	}
-
-	resp, err := h.client.Do(httpReq)
-	if err != nil {
-		return syntheticEarly(502, "upstream: "+err.Error())
+		head, copier := syntheticAsStream(synthetic(502, "upstream: "+err.Error()))
+		return head, copier, nil
 	}
 
 	head := &protocol.StreamEgressResponse{
-		Status:  resp.StatusCode,
-		Headers: make(map[string][]string, len(resp.Header)),
+		Status:        resp.StatusCode,
+		Headers:       make(map[string][]string, len(resp.Header)),
+		MatchedRuleID: prep.MatchedID,
 	}
 	for k, vs := range resp.Header {
 		if isHopByHop(k) {
 			continue
 		}
 		head.Headers[k] = append([]string(nil), vs...)
-	}
-	if matched != nil {
-		head.MatchedRuleID = matched.ID
 	}
 
 	// Defer body copy to the caller-supplied goroutine. Closes resp.Body
@@ -605,6 +504,31 @@ func (h *Handler) HandleStreaming(ctx context.Context, sandboxID string, req *pr
 // either with status 0 on a clean EOF or status 1 with a message on
 // any error.
 type BodyCopier func(sink StreamSink) error
+
+// syntheticAsStream converts a buffered EgressResponse (the shape
+// produced by prepareUpstream's short-circuit paths) into the
+// streaming pair: a head with the same status/headers/MatchedRuleID,
+// and a copier that emits the body as a single chunk followed by a
+// clean End. The caller never needs to look at EgressResponse for
+// streaming responses — only this conversion does.
+func syntheticAsStream(r *protocol.EgressResponse) (*protocol.StreamEgressResponse, BodyCopier) {
+	head := &protocol.StreamEgressResponse{
+		Status:        r.Status,
+		Headers:       r.Headers,
+		MatchedRuleID: r.MatchedRuleID,
+		Synthetic:     r.Synthetic,
+	}
+	body, _ := decodeBody(r.Body)
+	copier := func(sink StreamSink) error {
+		if len(body) > 0 {
+			if err := sink.WriteChunk(body); err != nil {
+				return err
+			}
+		}
+		return sink.End(protocol.StreamEndOK, "")
+	}
+	return head, copier
+}
 
 // Served returns the total egress requests handled across all sandboxes.
 func (h *Handler) Served() uint64 { return h.served.Load() }
