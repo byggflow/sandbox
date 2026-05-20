@@ -532,8 +532,11 @@ func (h *Handler) prepareUpstream(ctx context.Context, sandboxID string, req *pr
 	for k, vs := range headers {
 		httpReq.Header[http.CanonicalHeaderKey(k)] = append([]string(nil), vs...)
 	}
-	if hs, ok := headers["Host"]; ok && len(hs) > 0 {
-		httpReq.Host = hs[0]
+	// httpReq.Header.Get does the canonical-key lookup, so this finds
+	// any incoming "host" / "HOST" / "Host" the same way the inject
+	// loop above canonicalized keys when populating httpReq.Header.
+	if h := httpReq.Header.Get("Host"); h != "" {
+		httpReq.Host = h
 	}
 
 	matchedID := ""

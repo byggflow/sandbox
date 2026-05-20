@@ -47,6 +47,16 @@ func WriteCAFiles(pem string) error {
 		if _, err := io.Copy(merged, f); err != nil {
 			f.Close()
 			slog.Warn("egress ca: copying system bundle", "src", src, "error", err)
+			// A partial copy left N bytes of a truncated PEM in
+			// merged. Roll back so the next candidate (or the
+			// sandbox CA appended below) isn't concatenated onto
+			// the middle of a half-written cert.
+			if _, seekErr := merged.Seek(0, io.SeekStart); seekErr != nil {
+				return fmt.Errorf("rolling back partial bundle copy: %w", seekErr)
+			}
+			if truncErr := merged.Truncate(0); truncErr != nil {
+				return fmt.Errorf("truncating partial bundle: %w", truncErr)
+			}
 			continue
 		}
 		f.Close()

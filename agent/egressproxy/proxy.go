@@ -104,6 +104,12 @@ func (s *Server) ClearClientIf(expected *phonehome.Client) bool {
 	return s.client.CompareAndSwap(expected, nil)
 }
 
+// keepAliveReadTimeout bounds how long the sandbox client may stall
+// between requests on a keep-alive CONNECT tunnel. Matches the order
+// of http.Server.ReadHeaderTimeout we set on the outer listener so a
+// stalled sandbox client can't hold a goroutine open indefinitely.
+const keepAliveReadTimeout = 30 * time.Second
+
 // ListenAndServe binds the listener and serves until Close is called. It is
 // non-blocking: returns once the listener is bound and the accept loop has
 // started.
@@ -332,8 +338,17 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	defer tlsConn.Close()
 
 	// Loop over keep-alive: read requests one at a time, dispatch each.
+	// Each iteration bounds how long a misbehaving sandbox client can
+	// hold the goroutine open by stalling mid-headers or mid-body.
+	// Without a deadline, a client that opens CONNECT and then never
+	// sends another byte keeps this goroutine alive indefinitely; the
+	// outer ReadHeaderTimeout only covers the initial plain CONNECT.
 	reader := bufio.NewReader(tlsConn)
 	for {
+		if err := clientConn.SetReadDeadline(time.Now().Add(keepAliveReadTimeout)); err != nil {
+			s.log.Debug("egress: set tls read deadline", "error", err)
+			return
+		}
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
@@ -344,6 +359,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 		body, err := io.ReadAll(io.LimitReader(req.Body, protocol.MaxEgressBody+1))
 		req.Body.Close()
+		// Clear the read deadline so the upstream dispatch (which may
+		// stream a long response back) isn't aborted by the same
+		// header-timeout. The next iteration re-arms it.
+		_ = clientConn.SetReadDeadline(time.Time{})
 		if err != nil {
 			writeTLSError(tlsConn, http.StatusBadRequest, "read body: "+err.Error())
 			return

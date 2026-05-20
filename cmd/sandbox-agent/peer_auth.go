@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"log/slog"
 	"net"
 )
@@ -58,6 +57,3 @@ func nonLoopbackTCPListener(inner net.Listener) net.Listener {
 	}
 }
 
-// errRejected is returned when a connection fails peer auth. Useful for
-// tests that want to distinguish rejection from other accept errors.
-var errRejected = errors.New("peer auth: connection rejected")
