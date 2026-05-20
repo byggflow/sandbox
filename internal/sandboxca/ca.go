@@ -147,6 +147,15 @@ func (c *CA) Leaf(host string) (certPEM, keyPEM []byte, err error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// A concurrent miss for the same host may have raced ahead and
+	// already inserted an entry. Drop it before pushing ours so the
+	// list never holds an orphan node that the map can no longer reach
+	// (the eviction loop is gated by len(c.cache), so orphans would
+	// otherwise accumulate as a slow memory leak).
+	if existing, ok := c.cache[host]; ok {
+		c.lru.Remove(existing)
+		delete(c.cache, host)
+	}
 	// Evict if at capacity.
 	for len(c.cache) >= c.cacheMax {
 		oldest := c.lru.Back()

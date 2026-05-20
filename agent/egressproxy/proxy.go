@@ -77,6 +77,13 @@ func (s *Server) CloseStreams() {
 	s.streams.closeAll()
 }
 
+// CloseStreamsForClient tears down only streams allocated through c.
+// Called when an old daemon connection exits after a reconnect has
+// already installed a newer client.
+func (s *Server) CloseStreamsForClient(c *phonehome.Client) {
+	s.streams.closeAllForOwner(c)
+}
+
 // SetClient swaps in the phonehome client the proxy uses for dispatch.
 // Called from the agent server on each new daemon connection so the
 // proxy always writes to the current authenticated channel.
@@ -578,7 +585,7 @@ func (s *Server) dispatchStream(req *protocol.EgressRequest) (*protocol.StreamEg
 	if c == nil {
 		return nil, nil, func() {}, errors.New("no active daemon connection")
 	}
-	streamID, ch, release := s.streams.allocate()
+	streamID, ch, release := s.streams.allocate(c)
 	// On any error before we hand the stream to the caller, release.
 	ok := false
 	defer func() {

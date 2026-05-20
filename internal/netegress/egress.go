@@ -71,10 +71,23 @@ type Handler struct {
 type allowPrivateKey struct{}
 
 func withAllowPrivate(ctx context.Context) context.Context {
-	return context.WithValue(ctx, allowPrivateKey{}, true)
+	return withAllowPrivateValue(ctx, true)
+}
+func withAllowPrivateValue(ctx context.Context, allow bool) context.Context {
+	return context.WithValue(ctx, allowPrivateKey{}, allow)
 }
 func allowsPrivate(ctx context.Context) bool {
 	v, _ := ctx.Value(allowPrivateKey{}).(bool)
+	return v
+}
+
+type egressSandboxIDKey struct{}
+
+func withEgressSandboxID(ctx context.Context, sandboxID string) context.Context {
+	return context.WithValue(ctx, egressSandboxIDKey{}, sandboxID)
+}
+func egressSandboxID(ctx context.Context) string {
+	v, _ := ctx.Value(egressSandboxIDKey{}).(string)
 	return v
 }
 
@@ -139,37 +152,64 @@ func New() *Handler {
 		ExpectContinueTimeout: 1 * time.Second,
 		DisableCompression:    true, // body is opaque to us; upstream sees Accept-Encoding from sandbox
 	}
-	checkRedirect := func(req *http.Request, via []*http.Request) error {
-		// Stop following redirects on the daemon side; let the
-		// sandbox client decide. Some clients want to inspect 3xx
-		// themselves. serveSDKFetch flips this via context value to
-		// preserve the legacy follow-redirects behavior of the old
-		// agent-side net.Fetch.
-		if followsRedirects(req.Context()) {
-			if len(via) >= 10 {
-				return fmt.Errorf("stopped after 10 redirects")
-			}
-			return nil
-		}
-		return http.ErrUseLastResponse
-	}
-	return &Handler{
+	h := &Handler{
 		bySandbox: make(map[string]*netrules.Compiled),
 		caBySbx:   make(map[string]*sandboxca.CA),
 		destroyed: make(map[string]struct{}),
-		client: &http.Client{
-			Transport:     tr,
-			Timeout:       60 * time.Second,
-			CheckRedirect: checkRedirect,
-		},
-		streamClient: &http.Client{
-			Transport:     tr,
-			// No Timeout — streaming bodies legitimately run for
-			// minutes (SSE, LLM token streams, large downloads).
-			// Cancellation is via the request context.
-			CheckRedirect: checkRedirect,
-		},
 	}
+	h.client = &http.Client{
+		Transport:     tr,
+		Timeout:       60 * time.Second,
+		CheckRedirect: h.checkRedirect,
+	}
+	h.streamClient = &http.Client{
+		Transport: tr,
+		// No Timeout — streaming bodies legitimately run for
+		// minutes (SSE, LLM token streams, large downloads).
+		// Cancellation is via the request context.
+		CheckRedirect: h.checkRedirect,
+	}
+	return h
+}
+
+func (h *Handler) checkRedirect(req *http.Request, via []*http.Request) error {
+	// Stop following redirects on the daemon side; let the sandbox
+	// client decide. Some clients want to inspect 3xx themselves.
+	// serveSDKFetch flips this via context value to preserve the legacy
+	// follow-redirects behavior of the old agent-side net.Fetch.
+	if !followsRedirects(req.Context()) {
+		return http.ErrUseLastResponse
+	}
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+
+	matched := h.matchRule(egressSandboxID(req.Context()), req.URL, req.Method)
+	if matched != nil && matched.Action == netrules.ActionDeny {
+		return fmt.Errorf("redirect blocked by egress rule %s", matched.ID)
+	}
+	if matched == nil && isPrivateHost(req.URL.Hostname()) {
+		return fmt.Errorf("redirect to private address blocked")
+	}
+
+	// net/http reuses the previous request's context for redirects. Do
+	// not let a rule matched by the original URL carry allow-private
+	// into the redirected URL; the redirected target must match its own
+	// rule to keep private-address access.
+	reqCtx := withAllowPrivateValue(req.Context(), matched != nil)
+	*req = *req.WithContext(reqCtx)
+	return nil
+}
+
+func (h *Handler) matchRule(sandboxID string, u *url.URL, method string) *netrules.Rule {
+	if method == "" {
+		method = "GET"
+	}
+	rules := h.Rules(sandboxID)
+	if rules == nil {
+		return nil
+	}
+	return rules.Match(u.Hostname(), portFromURL(u), strings.ToUpper(method), u.Path)
 }
 
 // followRedirectsKey is the per-request context value that opts the
@@ -471,9 +511,9 @@ func (h *Handler) prepareUpstream(ctx context.Context, sandboxID string, req *pr
 	// Allow-private is per-request, scoped to matched rules only, so
 	// DNS-rebinding via a hostname pointed at 169.254.169.254 cannot
 	// reach IMDS unless an operator-installed rule already authorized.
-	reqCtx := ctx
+	reqCtx := withEgressSandboxID(ctx, sandboxID)
 	if matched != nil {
-		reqCtx = withAllowPrivate(ctx)
+		reqCtx = withAllowPrivate(reqCtx)
 	}
 	httpReq, err := http.NewRequestWithContext(reqCtx, method, parsed.String(), bytes.NewReader(body))
 	if err != nil {

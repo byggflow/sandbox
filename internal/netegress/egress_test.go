@@ -245,6 +245,73 @@ func TestGuardedDialContextAllowsPrivateWhenContextOptedIn(t *testing.T) {
 	}
 }
 
+func TestRedirectDoesNotCarryPrivateAllowanceToUnmatchedTarget(t *testing.T) {
+	h := New()
+	defer h.Close()
+	if err := h.SetRules("sbx-1", []netrules.Rule{
+		{ID: "public-ok", Match: netrules.Match{Host: "public.example"}, Action: netrules.ActionAllow},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := WithFollowRedirects(withAllowPrivate(withEgressSandboxID(context.Background(), "sbx-1")))
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost:1/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.checkRedirect(req, []*http.Request{{}}); err != nil {
+		t.Fatalf("hostname redirect check should defer DNS-private blocking to dialer: %v", err)
+	}
+	if allowsPrivate(req.Context()) {
+		t.Fatal("redirect inherited allow-private from the original matched request")
+	}
+	if _, err := guardedDialContext(req.Context(), "tcp", "localhost:1"); err == nil || !strings.Contains(err.Error(), "private address blocked") {
+		t.Fatalf("redirect context did not restore private-address guard, err=%v", err)
+	}
+}
+
+func TestRedirectAllowsPrivateOnlyWhenRedirectTargetMatches(t *testing.T) {
+	h := New()
+	defer h.Close()
+	if err := h.SetRules("sbx-1", []netrules.Rule{
+		{ID: "private-ok", Match: netrules.Match{Host: "127.0.0.1"}, Action: netrules.ActionAllow},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := WithFollowRedirects(withEgressSandboxID(context.Background(), "sbx-1"))
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://127.0.0.1:1/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.checkRedirect(req, []*http.Request{{}}); err != nil {
+		t.Fatalf("matched private redirect should be allowed: %v", err)
+	}
+	if !allowsPrivate(req.Context()) {
+		t.Fatal("matched private redirect did not receive allow-private context")
+	}
+}
+
+func TestRedirectBlocksPrivateIPLiteralWithoutRedirectRule(t *testing.T) {
+	h := New()
+	defer h.Close()
+	if err := h.SetRules("sbx-1", []netrules.Rule{
+		{ID: "public-ok", Match: netrules.Match{Host: "public.example"}, Action: netrules.ActionAllow},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := WithFollowRedirects(withAllowPrivate(withEgressSandboxID(context.Background(), "sbx-1")))
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://169.254.169.254/latest/meta-data/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.checkRedirect(req, []*http.Request{{}})
+	if err == nil || !strings.Contains(err.Error(), "private address blocked") {
+		t.Fatalf("expected private-address redirect block, got %v", err)
+	}
+}
+
 // mockSink captures stream frames in order so tests can assert on
 // chunked delivery semantics (each chunk arrives as its own WriteChunk
 // call rather than being coalesced).

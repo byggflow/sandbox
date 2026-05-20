@@ -179,6 +179,11 @@ func (s *Server) handleConn(conn net.Conn) {
 	if s.egressProxy != nil {
 		s.egressProxy.SetClient(phoneClient)
 		defer func() {
+			// Always close streams allocated through this connection's
+			// client. If a newer reconnect has already installed its
+			// own client, those streams are tagged with that newer
+			// owner and are left alone.
+			s.egressProxy.CloseStreamsForClient(phoneClient)
 			// Clear ONLY if the egress proxy still references this
 			// connection's client. On reconnect/session-replacement,
 			// a newer handleConn may have already installed its own
@@ -186,10 +191,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			// fresh one and leave the egress proxy with no daemon
 			// connection — all sandbox HTTP would then fail with
 			// "no active daemon connection" until another reconnect.
-			if s.egressProxy.ClearClientIf(phoneClient) {
-				// We were still the owner; tear down per-conn state.
-				s.egressProxy.CloseStreams()
-			}
+			s.egressProxy.ClearClientIf(phoneClient)
 			phoneClient.Close()
 		}()
 	}

@@ -600,6 +600,12 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
       // their ID over the wire; the function stays in the SDK process.
       const handlers = new Map<string, NetworkHandler>();
       let ruleQueue: Promise<void> = Promise.resolve();
+      // Monotonic counter for auto-generated defer ids. Using
+      // current.length would collide with user-supplied ids of the
+      // same shape (e.g. an intercept() containing "defer-2" followed
+      // by a defer() at length 2), silently overwriting the earlier
+      // handler in the registry.
+      let deferSeq = 0;
 
       // Register the dispatcher for incoming net.defer requests. Only
       // wires once per buildSandbox; subsequent intercept() calls just
@@ -672,6 +678,15 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
       return {
         async intercept(rules: NetworkRule[]): Promise<void> {
           return enqueueRuleOp(async () => {
+            // Validate before mutating `current` — otherwise a bad
+            // rule (e.g. defer without id) leaves the local mirror
+            // poisoned and every subsequent allow/deny/inject/defer
+            // re-throws because push() re-runs validation.
+            for (const r of rules) {
+              if (r.action === "defer" && r.handler && !r.id) {
+                throw new Error("network.intercept: defer rules require an id");
+              }
+            }
             current = rules.slice();
             await push();
           });
@@ -700,7 +715,7 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
         },
         async defer(host: string, handler: NetworkHandler, id?: string): Promise<void> {
           return enqueueRuleOp(async () => {
-            const ruleID = id ?? `defer-${current.length}`;
+            const ruleID = id ?? `defer-${++deferSeq}`;
             current.push({ id: ruleID, match: { host }, action: "defer", handler });
             await push();
           });

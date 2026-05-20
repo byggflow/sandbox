@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/byggflow/sandbox/agent/phonehome"
 )
 
 // streamChunk is one frame's worth of body bytes for a stream, or the
@@ -40,6 +42,7 @@ type streamRegistry struct {
 }
 
 type streamEntry struct {
+	owner    *phonehome.Client
 	ch       chan streamChunk
 	done     chan struct{}
 	doneOnce sync.Once // guards close(done) — both release() and closeAll() may fire
@@ -63,11 +66,12 @@ func newStreamRegistry() *streamRegistry {
 // channel plus a release func the caller must defer. release closes
 // the entry's done channel so any deliver currently blocked on the
 // full buffer unblocks immediately.
-func (r *streamRegistry) allocate() (uint32, <-chan streamChunk, func()) {
+func (r *streamRegistry) allocate(owner *phonehome.Client) (uint32, <-chan streamChunk, func()) {
 	id := r.nextID.Add(1)
 	entry := &streamEntry{
-		ch:   make(chan streamChunk, streamBuffer),
-		done: make(chan struct{}),
+		owner: owner,
+		ch:    make(chan streamChunk, streamBuffer),
+		done:  make(chan struct{}),
 	}
 	r.mu.Lock()
 	r.streams[id] = entry
@@ -124,9 +128,22 @@ func (r *streamRegistry) deliver(streamID uint32, chunk streamChunk) bool {
 // has exited. The consumer (HTTP proxy handler) is responsible for
 // draining the channel, which it does naturally via `for ... range`.
 func (r *streamRegistry) closeAll() {
+	r.closeMatching(func(*streamEntry) bool { return true })
+}
+
+func (r *streamRegistry) closeAllForOwner(owner *phonehome.Client) {
+	r.closeMatching(func(entry *streamEntry) bool { return entry.owner == owner })
+}
+
+func (r *streamRegistry) closeMatching(match func(*streamEntry) bool) {
 	r.mu.Lock()
-	streams := r.streams
-	r.streams = make(map[uint32]*streamEntry)
+	var streams []*streamEntry
+	for id, entry := range r.streams {
+		if match(entry) {
+			delete(r.streams, id)
+			streams = append(streams, entry)
+		}
+	}
 	r.mu.Unlock()
 
 	for _, entry := range streams {

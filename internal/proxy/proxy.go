@@ -166,6 +166,8 @@ func (s *Session) CallClient(ctx context.Context, method string, params interfac
 		return resp, nil
 	case <-time.After(timeout):
 		return nil, fmt.Errorf("client request timed out after %s", timeout)
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case <-s.ctx.Done():
 		return nil, fmt.Errorf("session closed: %w", s.ctx.Err())
 	}
