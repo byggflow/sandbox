@@ -184,12 +184,42 @@ func (h *Handler) checkRedirect(req *http.Request, via []*http.Request) error {
 		return fmt.Errorf("stopped after 10 redirects")
 	}
 
-	matched := h.matchRule(egressSandboxID(req.Context()), req.URL, req.Method)
+	sandboxID := egressSandboxID(req.Context())
+	matched := h.matchRule(sandboxID, req.URL, req.Method)
 	if matched != nil && matched.Action == netrules.ActionDeny {
 		return fmt.Errorf("redirect blocked by egress rule %s", matched.ID)
 	}
 	if matched == nil && isPrivateHost(req.URL.Hostname()) {
 		return fmt.Errorf("redirect to private address blocked")
+	}
+
+	// When the redirect crosses host boundaries, strip any inject
+	// headers that the previous hop's rule added. net/http only strips
+	// well-known auth headers (Authorization, Cookie, WWW-Authenticate)
+	// across hosts; custom inject headers like X-API-Key would
+	// otherwise leak to the redirected origin.
+	if len(via) > 0 {
+		prev := via[len(via)-1]
+		// prev.URL is nil in some tests and conceivably in
+		// pathological net/http states; skip the cross-host scrub
+		// rather than crash.
+		if prev.URL != nil && !sameHost(prev.URL, req.URL) {
+			if prevRule := h.matchRule(sandboxID, prev.URL, prev.Method); prevRule != nil && prevRule.Action == netrules.ActionInject {
+				for k := range prevRule.Inject.SetHeaders {
+					req.Header.Del(k)
+				}
+			}
+			// Re-apply the new rule's inject (if any) so the
+			// redirected origin still gets its configured creds.
+			if matched != nil && matched.Action == netrules.ActionInject {
+				for k, v := range matched.Inject.SetHeaders {
+					req.Header.Set(k, v)
+				}
+				for _, k := range matched.Inject.RemoveHeaders {
+					req.Header.Del(k)
+				}
+			}
+		}
 	}
 
 	// net/http reuses the previous request's context for redirects. Do
@@ -199,6 +229,10 @@ func (h *Handler) checkRedirect(req *http.Request, via []*http.Request) error {
 	reqCtx := withAllowPrivateValue(req.Context(), matched != nil)
 	*req = *req.WithContext(reqCtx)
 	return nil
+}
+
+func sameHost(a, b *url.URL) bool {
+	return strings.EqualFold(a.Hostname(), b.Hostname())
 }
 
 func (h *Handler) matchRule(sandboxID string, u *url.URL, method string) *netrules.Rule {

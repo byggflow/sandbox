@@ -110,6 +110,30 @@ func (s *Server) ClearClientIf(expected *phonehome.Client) bool {
 // stalled sandbox client can't hold a goroutine open indefinitely.
 const keepAliveReadTimeout = 30 * time.Second
 
+// chunkWriteTimeout bounds how long a single chunk write to the
+// sandbox client can stall before the handler gives up. Long enough
+// for normal TCP backpressure on slow downstreams, short enough that
+// a non-reading client can't pin the goroutine + stream-channel and
+// indirectly stall the agent's read loop.
+const chunkWriteTimeout = 30 * time.Second
+
+// deadlineWriter resets the underlying conn's write deadline on every
+// Write so a single stalled write can't block forever — without
+// capping total stream duration. Used for the TLS chunked response in
+// the CONNECT keep-alive loop.
+type deadlineWriter struct {
+	conn    net.Conn
+	w       io.Writer
+	timeout time.Duration
+}
+
+func (d *deadlineWriter) Write(p []byte) (int, error) {
+	if err := d.conn.SetWriteDeadline(time.Now().Add(d.timeout)); err != nil {
+		return 0, err
+	}
+	return d.w.Write(p)
+}
+
 // tlsHandshakeTimeout bounds the TLS handshake the agent performs
 // with the sandbox client after CONNECT. Hijacking the conn removes
 // the http.Server's context-driven cancellation, so without this a
@@ -204,6 +228,18 @@ func (s *Server) handlePlain(w http.ResponseWriter, r *http.Request) {
 
 	for k, vs := range head.Headers {
 		if isHopByHop(k) {
+			continue
+		}
+		// Strip Content-Length / Transfer-Encoding: we stream the body
+		// chunk-by-chunk and net/http picks the right framing on its
+		// own. Leaving the upstream's Content-Length in place forces
+		// fixed-length mode — and any rule that rewrites or truncates
+		// the body then hangs (client waits for the announced bytes)
+		// or silently drops (server stops writing at the announced
+		// length). The TLS CONNECT path already strips these; this
+		// matches the same contract on the plain HTTP path.
+		lk := strings.ToLower(k)
+		if lk == "content-length" || lk == "transfer-encoding" {
 			continue
 		}
 		w.Header()[http.CanonicalHeaderKey(k)] = append([]string(nil), vs...)
@@ -411,11 +447,19 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := writeStreamTLSResponse(tlsConn, head, ch); err != nil {
+		// Bump the write deadline on every write so a stalled sandbox
+		// client can't pin tlsConn.Write indefinitely. Without this,
+		// release() never fires, the stream channel fills, and the
+		// agent's single read loop blocks delivering further frames —
+		// stalling every other stream and ping on the daemon
+		// connection.
+		dw := &deadlineWriter{conn: clientConn, w: tlsConn, timeout: chunkWriteTimeout}
+		if err := writeStreamTLSResponse(dw, head, ch); err != nil {
 			s.log.Debug("egress: write tls response", "error", err)
 			release()
 			return
 		}
+		_ = clientConn.SetWriteDeadline(time.Time{})
 		release()
 
 		// Close on Connection: close or HTTP/1.0 without keep-alive.

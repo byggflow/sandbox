@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -309,6 +310,65 @@ func TestRedirectBlocksPrivateIPLiteralWithoutRedirectRule(t *testing.T) {
 	err = h.checkRedirect(req, []*http.Request{{}})
 	if err == nil || !strings.Contains(err.Error(), "private address blocked") {
 		t.Fatalf("expected private-address redirect block, got %v", err)
+	}
+}
+
+func TestRedirectStripsCrossHostInjectHeaders(t *testing.T) {
+	h := New()
+	defer h.Close()
+	if err := h.SetRules("sbx-1", []netrules.Rule{
+		{ID: "api-creds", Match: netrules.Match{Host: "api.example"}, Action: netrules.ActionInject,
+			Inject: netrules.Inject{SetHeaders: map[string]string{"X-API-Key": "secret"}}},
+		{ID: "other", Match: netrules.Match{Host: "other.example"}, Action: netrules.ActionAllow},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	prevURL, _ := url.Parse("https://api.example/foo")
+	prev := &http.Request{URL: prevURL, Method: "GET"}
+
+	ctx := WithFollowRedirects(withEgressSandboxID(context.Background(), "sbx-1"))
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://other.example/bar", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the state net/http leaves on a redirect: the inject
+	// header set on the original request is still in req.Header.
+	req.Header.Set("X-API-Key", "secret")
+
+	if err := h.checkRedirect(req, []*http.Request{prev}); err != nil {
+		t.Fatalf("checkRedirect: %v", err)
+	}
+	if got := req.Header.Get("X-API-Key"); got != "" {
+		t.Errorf("expected X-API-Key stripped across hosts, got %q", got)
+	}
+}
+
+func TestRedirectReappliesInjectOnNewHost(t *testing.T) {
+	h := New()
+	defer h.Close()
+	if err := h.SetRules("sbx-1", []netrules.Rule{
+		{ID: "old", Match: netrules.Match{Host: "old.example"}, Action: netrules.ActionInject,
+			Inject: netrules.Inject{SetHeaders: map[string]string{"X-Old": "x"}}},
+		{ID: "new", Match: netrules.Match{Host: "new.example"}, Action: netrules.ActionInject,
+			Inject: netrules.Inject{SetHeaders: map[string]string{"X-New": "y"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prevURL, _ := url.Parse("https://old.example/")
+	prev := &http.Request{URL: prevURL, Method: "GET"}
+	ctx := WithFollowRedirects(withEgressSandboxID(context.Background(), "sbx-1"))
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://new.example/", nil)
+	req.Header.Set("X-Old", "x")
+
+	if err := h.checkRedirect(req, []*http.Request{prev}); err != nil {
+		t.Fatalf("checkRedirect: %v", err)
+	}
+	if v := req.Header.Get("X-Old"); v != "" {
+		t.Errorf("old inject header should be stripped, got %q", v)
+	}
+	if v := req.Header.Get("X-New"); v != "y" {
+		t.Errorf("new inject header should be applied, got %q", v)
 	}
 }
 

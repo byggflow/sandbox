@@ -761,7 +761,11 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
         async defer(host: string, handler: NetworkHandler, id?: string): Promise<void> {
           return enqueueRuleOp(async () => {
             const snapshot = current.slice();
-            const ruleID = id ?? `defer-${++deferSeq}`;
+            // Auto-IDs use a sentinel prefix that's invalid as a user
+            // ID (rejected at rule validation if anyone tries) so a
+            // user-supplied "defer-1" can't collide with an
+            // auto-generated one and silently overwrite the handler.
+            const ruleID = id ?? `__sdk_defer_${++deferSeq}`;
             current.push({ id: ruleID, match: { host }, action: "defer", handler });
             await pushOrRollback(snapshot);
           });

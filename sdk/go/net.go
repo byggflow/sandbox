@@ -204,7 +204,10 @@ func (n *NetCategory) Defer(ctx context.Context, host string, handler NetworkHan
 		ruleID = id[0]
 	}
 	if ruleID == "" {
-		ruleID = fmt.Sprintf("defer-%d", n.deferSeq.Add(1))
+		// Sentinel prefix so an auto-generated ID can't collide with
+		// a user-supplied "defer-1" and silently overwrite the
+		// handler in the registry.
+		ruleID = fmt.Sprintf("__sdk_defer_%d", n.deferSeq.Add(1))
 	}
 	return n.appendRule(ctx, NetworkRule{
 		ID:      ruleID,

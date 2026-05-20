@@ -379,12 +379,20 @@ func (s *Session) maybeServeLocal(payload []byte, handler LocalHandler, owns Met
 			s.log.Error("marshal "+side+"-request response", "error", mErr)
 			return
 		}
-		if writeErr := s.writeLocalResponse(side, data); writeErr != nil {
+		writeErr := s.writeLocalResponse(side, data)
+		if writeErr != nil {
 			s.log.Error("write "+side+"-request response", "error", writeErr)
-			return
 		}
+		// Always run afterWrite — it owns the body copier whose defer
+		// closes resp.Body. Skipping it on write failure leaks the
+		// upstream connection (no Close, no return to the transport's
+		// idle pool). The copier itself sees the broken sink and ends
+		// the stream with an error frame, which is the right signal.
 		if afterWrite != nil {
 			afterWrite()
+		}
+		if writeErr != nil {
+			return
 		}
 	}(env.Method, env.Params, id)
 	return true
