@@ -33,7 +33,7 @@ func TestAgentRequestHookServesLocally(t *testing.T) {
 			hookCalled <- struct{}{}
 			return map[string]string{"status": "ok"}, nil
 		},
-		AgentRequestMethods: func(method string) bool { return method == "net.egress" },
+		AgentRequestMethods: func(method string, _ json.RawMessage) bool { return method == "net.egress" },
 	}
 
 	// We don't need a real websocket for this test — the request never

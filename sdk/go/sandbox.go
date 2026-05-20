@@ -313,22 +313,48 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 		authHeaders: headers,
 	}
 
-	// Install any rules supplied via opts.Network.Egress before returning.
+	// Install any rules supplied via opts.Network.Egress before
+	// returning. If anything throws here (encrypted+rules conflict,
+	// daemon rejection, transport error), we MUST destroy the sandbox
+	// the daemon already created — otherwise Create returns an error
+	// while leaving an orphan sandbox alive on the daemon.
 	if opts != nil && opts.Network != nil && len(opts.Network.Egress) > 0 {
-		// E2E encryption hides params from the daemon; network
-		// middleware requires daemon-side rule evaluation. Fail fast
-		// rather than silently dropping the rules over the wire.
-		if opts.Encrypted {
-			sbx.Close()
-			return nil, fmt.Errorf("sandbox: network middleware is incompatible with Encrypted=true (the daemon needs to read params to apply rules)")
-		}
-		if err := sbx.Net().Intercept(ctx, opts.Network.Egress); err != nil {
-			sbx.Close()
-			return nil, fmt.Errorf("sandbox: install network rules: %w", err)
+		if err := installNetworkOrCleanup(ctx, sbx, opts); err != nil {
+			return nil, err
 		}
 	}
 
 	return sbx, nil
+}
+
+// installNetworkOrCleanup tries to install the configured network
+// rules; on any failure it tears down the sandbox (close transport +
+// DELETE on the daemon) so the user doesn't end up with an orphan.
+// Cleanup errors are swallowed — the original install failure is what
+// the caller needs to see.
+func installNetworkOrCleanup(ctx context.Context, sbx *Sandbox, opts *Options) error {
+	var failure error
+	if opts.Encrypted {
+		failure = fmt.Errorf("sandbox: network middleware is incompatible with Encrypted=true (the daemon needs to read params to apply rules)")
+	} else if err := sbx.Net().Intercept(ctx, opts.Network.Egress); err != nil {
+		failure = fmt.Errorf("sandbox: install network rules: %w", err)
+	}
+	if failure == nil {
+		return nil
+	}
+	_ = sbx.Close()
+	if sbx.httpClient != nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, sbx.httpBaseURL+"/sandboxes/"+sbx.ID, nil)
+		if err == nil {
+			for k, v := range sbx.authHeaders {
+				req.Header.Set(k, v)
+			}
+			if resp, doErr := sbx.httpClient.Do(req); doErr == nil {
+				resp.Body.Close()
+			}
+		}
+	}
+	return failure
 }
 
 // buildWSURL constructs the WebSocket URL for a sandbox.

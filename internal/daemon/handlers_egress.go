@@ -20,7 +20,7 @@ func decodeBase64(s string) ([]byte, error) { return base64.StdEncoding.DecodeSt
 // agentLocalMethods is the synchronous claim check for agent->daemon
 // Requests. Listed methods are routed to handlers that never have binary
 // follow-up frames, so claiming them at the WS-read goroutine is safe.
-func agentLocalMethods(method string) bool {
+func agentLocalMethods(method string, _ json.RawMessage) bool {
 	switch method {
 	case protocol.OpNetEgress, protocol.OpNetEgressStream, protocol.OpNetCertLeaf:
 		return true
@@ -45,26 +45,50 @@ func (s *agentStreamSink) End(status byte, errMsg string) error {
 }
 
 // clientLocalMethodsFor builds the claim check for SDK->daemon Requests.
-// OpNetRulesSet and OpNetFetch are ALWAYS served locally on the daemon
-// when the egress handler is configured. The previous gating-by-rules
-// behavior left a divergent code path through the agent's net.Fetch
-// (with its own private-IP guard that drifted from the daemon's). One
-// path is simpler and means the SSRF guard, header canonicalization,
-// and CIDR list have a single source of truth.
+// OpNetRulesSet is always served locally when egress is configured.
+// OpNetFetch is served locally for plaintext params; E2E-encrypted
+// params ({"_encrypted":"..."}) flow through to the agent's handler
+// because the daemon has no session key. This keeps encrypted
+// sandboxes working with their pre-existing sbx.net.fetch path while
+// preserving the daemon-side rule-application for non-encrypted ones.
 //
 // fs.write / fs.upload / fs.read NEVER appear here because the claim
 // check is methodname-exact and those names aren't in our list, so
 // their JSON+binary frame pairs always go through in order.
 func (d *Daemon) clientLocalMethodsFor(_ string) proxy.MethodSet {
-	return func(method string) bool {
+	return func(method string, params json.RawMessage) bool {
 		switch method {
 		case protocol.OpNetRulesSet:
+			// Rules.set on an encrypted session can't work (daemon
+			// would store an empty rule list); reject at claim time
+			// so the existing rejectEncryptedParams error fires.
 			return true
 		case protocol.OpNetFetch:
-			return d.Egress != nil
+			if d.Egress == nil {
+				return false
+			}
+			if isEncryptedParams(params) {
+				// Encrypted: forward to agent for E2E-decrypted dispatch.
+				return false
+			}
+			return true
 		}
 		return false
 	}
+}
+
+// isEncryptedParams returns true when the JSON payload carries the
+// E2E-encrypted envelope shape {"_encrypted":"..."}. The agent
+// decrypts these via its session key; the daemon has no key and must
+// not try to interpret them.
+func isEncryptedParams(params json.RawMessage) bool {
+	var probe struct {
+		Encrypted string `json:"_encrypted"`
+	}
+	if err := json.Unmarshal(params, &probe); err != nil {
+		return false
+	}
+	return probe.Encrypted != ""
 }
 
 // makeAgentRequestHandler builds a proxy.LocalHandler that dispatches

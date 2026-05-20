@@ -12,6 +12,7 @@ import (
 	"github.com/byggflow/sandbox/agent/egressproxy"
 	"github.com/byggflow/sandbox/agent/env"
 	"github.com/byggflow/sandbox/agent/fs"
+	agentnet "github.com/byggflow/sandbox/agent/net"
 	"github.com/byggflow/sandbox/agent/process"
 	codec "github.com/byggflow/sandbox/agent/protocol"
 	proto "github.com/byggflow/sandbox/protocol"
@@ -107,11 +108,15 @@ func NewDispatcher() *Dispatcher {
 	d.simple[proto.OpEnvDelete] = envStore.Delete
 	d.simple[proto.OpEnvList] = envStore.List
 
-	// Network. OpNetFetch is intentionally NOT registered here —
-	// SDK-initiated fetches are claimed and served by the daemon, which
-	// applies any installed rules and dials with the SSRF-hardened
-	// guardedDialContext. Routing through the agent would bypass the
-	// daemon's rule application and duplicate the private-IP guard.
+	// Network. OpNetFetch is registered here ONLY as the
+	// encrypted-passthrough fallback: when the SDK uses encrypted=true,
+	// params arrive as {"_encrypted":"..."} which the daemon can't
+	// decrypt, so its claim check declines and the frame forwards
+	// here. The agent decrypts via the session key, calls Fetch, and
+	// re-encrypts the response. Rule application happens ONLY on the
+	// daemon path (clientLocalMethodsFor claims plaintext fetches);
+	// encrypted sandboxes are documented as incompatible with rules.
+	d.simple[proto.OpNetFetch] = agentnet.Fetch
 	d.simple[proto.OpNetCAInstall] = installCA
 
 	// E2E encryption negotiation

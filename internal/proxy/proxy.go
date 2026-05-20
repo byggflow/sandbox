@@ -24,7 +24,12 @@ type LocalHandler func(ctx context.Context, method string, params json.RawMessag
 // any goroutine is spawned. Methods that aren't claimed flow through
 // unchanged so any binary follow-up frames stay in order with the JSON
 // Request that owns them.
-type MethodSet func(method string) bool
+// MethodSet decides whether the daemon's local hook owns this Request.
+// It receives the method name AND the raw params so callers can peek
+// inside without fully decoding — e.g. E2E-encrypted calls arrive as
+// {"_encrypted": "..."} and the daemon cannot serve them locally
+// (it has no session key); those should not be claimed.
+type MethodSet func(method string, params json.RawMessage) bool
 
 // Hooks wires daemon-side handlers into a proxy Session. AgentRequest is
 // invoked when the AGENT sends a JSON-RPC Request to the daemon
@@ -331,7 +336,7 @@ func (s *Session) maybeServeLocal(payload []byte, handler LocalHandler, owns Met
 	if kind != protocol.FrameKindRequest {
 		return false
 	}
-	if !owns(env.Method) {
+	if !owns(env.Method, env.Params) {
 		// Not ours — fall through synchronously so the read loop keeps
 		// forwarding any binary frames that belong to this Request.
 		return false

@@ -10,10 +10,12 @@ import (
 )
 
 // TestRejectEncryptedParams confirms the daemon refuses E2E-encrypted
-// params on its network-middleware methods. Regression for the silent-
-// data-loss bug where {_encrypted: "..."} unmarshalled into the rules
-// shape produced an empty rule list (clearing all rules) or an empty
-// fetch URL.
+// params on rules.set. (net.fetch uses isEncryptedParams in the claim
+// check to FORWARD encrypted requests to the agent's E2E handler
+// instead of rejecting them, so rejectEncryptedParams there is just
+// defense in depth.) Regression for the silent-data-loss bug where
+// {_encrypted: "..."} unmarshalled into the rules shape produced an
+// empty rule list (clearing all rules).
 func TestRejectEncryptedParams(t *testing.T) {
 	encrypted := json.RawMessage(`{"_encrypted":"AAECAwQF==base64ciphertext"}`)
 	plain := json.RawMessage(`{"rules":[]}`)
@@ -30,6 +32,30 @@ func TestRejectEncryptedParams(t *testing.T) {
 	// and return a more useful error).
 	if err := rejectEncryptedParams(json.RawMessage(`not-json`), "net.rules.set"); err != nil {
 		t.Errorf("malformed params shouldn't be rejected by the encryption guard: %v", err)
+	}
+}
+
+// TestClientLocalMethodsForwardsEncryptedFetch confirms the daemon
+// declines to claim net.fetch when params are E2E-encrypted, so the
+// frame forwards to the agent's E2E-decrypted handler. Without this,
+// encrypted sandboxes lost sbx.net.fetch (the previous "always claim"
+// behavior fired rejectEncryptedParams and surfaced 502).
+func TestClientLocalMethodsForwardsEncryptedFetch(t *testing.T) {
+	d := &Daemon{Egress: netegress.New()}
+	defer d.Egress.Close()
+	owns := d.clientLocalMethodsFor("sbx-1")
+
+	plain := json.RawMessage(`{"url":"https://api.example.com/"}`)
+	encrypted := json.RawMessage(`{"_encrypted":"ciphertext"}`)
+
+	if !owns("net.fetch", plain) {
+		t.Error("plain net.fetch must be claimed by daemon (rule application path)")
+	}
+	if owns("net.fetch", encrypted) {
+		t.Error("encrypted net.fetch must NOT be claimed (forwards to agent for E2E decrypt)")
+	}
+	if !owns("net.rules.set", plain) {
+		t.Error("net.rules.set must be claimed; rejectEncryptedParams handles the encrypted case")
 	}
 }
 

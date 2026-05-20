@@ -863,17 +863,36 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
 
   // Install any rules supplied via opts.network.egress before returning. We
   // do this after construction so the same code path is used as a runtime
-  // intercept() call.
+  // intercept() call. If anything throws here (encrypted+rules conflict,
+  // daemon rejection, transport error), we MUST destroy the sandbox the
+  // daemon already created — otherwise createSandbox() returns an error
+  // while leaving a sandbox alive on the daemon, charging the user for a
+  // sandbox they can't reach.
   if (opts?.network?.egress && opts.network.egress.length > 0) {
-    if (opts.encrypted) {
-      // E2E encryption hides params from the daemon; network middleware
-      // requires daemon-side rule evaluation. Fail fast here rather
-      // than silently dropping the rules.
-      throw new Error(
-        "network middleware is incompatible with encrypted=true (the daemon needs to read params to apply rules)",
-      );
+    try {
+      if (opts.encrypted) {
+        throw new Error(
+          "network middleware is incompatible with encrypted=true (the daemon needs to read params to apply rules)",
+        );
+      }
+      await sbx.network.intercept(opts.network.egress);
+    } catch (err) {
+      // Best-effort cleanup. Close the transport first so the daemon
+      // notices the disconnect, then DELETE the sandbox so it doesn't
+      // linger as an orphan. Swallow cleanup errors — the original
+      // failure is the one the caller needs.
+      try {
+        await sbx.close();
+      } catch {
+        // ignore
+      }
+      try {
+        await daemonFetch(`/sandboxes/${sandboxId}`, { method: "DELETE", headers });
+      } catch {
+        // ignore
+      }
+      throw err;
     }
-    await sbx.network.intercept(opts.network.egress);
   }
 
   return sbx;
