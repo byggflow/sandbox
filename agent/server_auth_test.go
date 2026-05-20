@@ -40,7 +40,7 @@ func TestAuthBootstrapHappyPath(t *testing.T) {
 		t.Errorf("token not installed: %q", got)
 	}
 	// And the nonce should be consumed.
-	if s.consumeBootstrap() != "" {
+	if s.peekBootstrap() != "" {
 		t.Error("bootstrap nonce was not consumed by successful exchange")
 	}
 }
@@ -65,10 +65,60 @@ func TestAuthBootstrapRejectsBadNonce(t *testing.T) {
 	}
 	_ = client.Close()
 
-	// Nonce should be consumed even on failure — single-use means
-	// single-use, no retry.
-	if s.consumeBootstrap() != "" {
-		t.Error("bootstrap nonce should be consumed even on failed attempt")
+	// Nonce must NOT be consumed on a failed attempt — otherwise any
+	// caller with a wrong guess would brick the daemon's bootstrap
+	// and disable authConfigured() entirely. Real daemon retry must
+	// still succeed.
+	if got := s.peekBootstrap(); got != "good-nonce" {
+		t.Errorf("bootstrap nonce must survive a failed bad-nonce attempt; got %q", got)
+	}
+	// Token should NOT be installed.
+	if tok := s.currentAuthToken(); tok != "" {
+		t.Errorf("token must not be installed by a failed bootstrap; got %q", tok)
+	}
+}
+
+// TestAuthBootstrapBadGuessDoesNotDisableAuth is the regression test
+// for the auth-bypass: an attacker (or buggy client) racing the
+// daemon with a wrong-nonce bootstrap MUST NOT brick auth. Before
+// the fix, the agent consumed the nonce before validating, so:
+//   - bootstrap was cleared
+//   - authToken stayed empty
+//   - authConfigured() returned false on subsequent connections
+//   - the agent then accepted EVERY incoming connection without auth
+// The real daemon must still be able to complete bootstrap after the
+// bad guess.
+func TestAuthBootstrapBadGuessDoesNotDisableAuth(t *testing.T) {
+	s := &Server{
+		bootstrap:  "real-nonce",
+		dispatcher: NewDispatcher(),
+		quit:       make(chan struct{}),
+	}
+
+	// First: bad guess from attacker.
+	c1, srv1 := net.Pipe()
+	go s.authenticateConnInTest(t, srv1)
+	writeRPC(t, c1, 1, proto.OpAuthBootstrap, map[string]string{"nonce": "wrong", "token": "attacker"})
+	if r := readRPC(t, c1); r.Error == nil {
+		t.Fatal("bad nonce should be rejected")
+	}
+	_ = c1.Close()
+
+	// Auth must still be REQUIRED (nonce preserved, OR token set).
+	if !s.authConfigured() {
+		t.Fatal("auth disabled after bad bootstrap attempt — attacker can now connect unauthenticated")
+	}
+
+	// Second: real daemon completes bootstrap.
+	c2, srv2 := net.Pipe()
+	go s.authenticateConnInTest(t, srv2)
+	writeRPC(t, c2, 1, proto.OpAuthBootstrap, map[string]string{"nonce": "real-nonce", "token": "real-T"})
+	if r := readRPC(t, c2); r.Error != nil {
+		t.Fatalf("real bootstrap rejected after bad-nonce: %v", r.Error)
+	}
+	_ = c2.Close()
+	if got := s.currentAuthToken(); got != "real-T" {
+		t.Errorf("real token not installed: %q", got)
 	}
 }
 
@@ -78,7 +128,7 @@ func TestAuthBootstrapRefusedAfterConsumption(t *testing.T) {
 		dispatcher: NewDispatcher(),
 		quit:       make(chan struct{}),
 	}
-	s.consumeBootstrap() // simulate a prior successful bootstrap
+	s.consumeBootstrap() // simulate a prior successful bootstrap (nonce now empty)
 
 	client, server := net.Pipe()
 	go s.authenticateConnInTest(t, server)

@@ -179,12 +179,17 @@ func (s *Server) handleConn(conn net.Conn) {
 	if s.egressProxy != nil {
 		s.egressProxy.SetClient(phoneClient)
 		defer func() {
-			// Clear the client on disconnect so dispatch fails fast
-			// rather than writing to a closed conn.
-			s.egressProxy.SetClient(nil)
-			// Unblock any pending stream readers with a clear error
-			// rather than letting them hang on a dead conn.
-			s.egressProxy.CloseStreams()
+			// Clear ONLY if the egress proxy still references this
+			// connection's client. On reconnect/session-replacement,
+			// a newer handleConn may have already installed its own
+			// phoneClient; clearing unconditionally would wipe the
+			// fresh one and leave the egress proxy with no daemon
+			// connection — all sandbox HTTP would then fail with
+			// "no active daemon connection" until another reconnect.
+			if s.egressProxy.ClearClientIf(phoneClient) {
+				// We were still the owner; tear down per-conn state.
+				s.egressProxy.CloseStreams()
+			}
 			phoneClient.Close()
 		}()
 	}
@@ -302,13 +307,23 @@ func (s *Server) authConfigured() bool {
 	return s.bootstrap != "" || s.authToken != ""
 }
 
-// consumeBootstrap returns the bootstrap nonce and clears it. Single-use.
-func (s *Server) consumeBootstrap() string {
+// peekBootstrap returns the configured nonce without clearing it.
+// Used by handleBootstrap for the constant-time compare. Clearing
+// before validation would let any caller with a bad guess permanently
+// disable the bootstrap path (and worse — leave authConfigured() false
+// so subsequent connections are accepted without authentication).
+func (s *Server) peekBootstrap() string {
+	s.authMu.RLock()
+	defer s.authMu.RUnlock()
+	return s.bootstrap
+}
+
+// consumeBootstrap clears the nonce. Called ONLY after a successful
+// constant-time match in handleBootstrap.
+func (s *Server) consumeBootstrap() {
 	s.authMu.Lock()
-	defer s.authMu.Unlock()
-	n := s.bootstrap
 	s.bootstrap = ""
-	return n
+	s.authMu.Unlock()
 }
 
 // setAuthToken replaces the long-lived token. Used after a successful
@@ -376,7 +391,11 @@ func (s *Server) handleBootstrap(conn net.Conn, req *proto.Request) bool {
 		return false
 	}
 
-	expected := s.consumeBootstrap()
+	// Peek at the nonce without clearing — clearing before validation
+	// would let any caller with a wrong guess permanently disable
+	// bootstrap AND drop authConfigured() to false (which would then
+	// accept all subsequent connections unauthenticated).
+	expected := s.peekBootstrap()
 	if expected == "" {
 		// Bootstrap already used (or never configured). Reject.
 		s.sendAuthError(conn, req.ID, "bootstrap unavailable")
@@ -385,6 +404,7 @@ func (s *Server) handleBootstrap(conn net.Conn, req *proto.Request) bool {
 	if subtle.ConstantTimeCompare([]byte(params.Nonce), []byte(expected)) != 1 {
 		slog.Warn("auth: invalid bootstrap nonce", "remote", conn.RemoteAddr())
 		s.sendAuthError(conn, req.ID, "invalid bootstrap nonce")
+		// Nonce stays — the real daemon can still complete bootstrap.
 		return false
 	}
 	if params.Token == "" {
@@ -392,7 +412,10 @@ func (s *Server) handleBootstrap(conn net.Conn, req *proto.Request) bool {
 		return false
 	}
 
+	// Validated — install token then clear the nonce so it can't be
+	// replayed.
 	s.setAuthToken(params.Token)
+	s.consumeBootstrap()
 	codec.WriteJSON(conn, proto.Response{
 		JSONRPC: "2.0",
 		ID:      req.ID,

@@ -897,7 +897,15 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
         // ignore
       }
       try {
-        await daemonFetch(`/sandboxes/${sandboxId}`, { method: "DELETE", headers });
+        // Re-resolve auth for the DELETE path. With per-request
+        // signing, the headers used for POST /sandboxes do not
+        // validate for DELETE /sandboxes/{id} — using the stale
+        // headers would make the cleanup silently fail and leave
+        // the just-created sandbox orphaned.
+        const deleteHeaders = signer
+          ? await signer.resolveForRequest("DELETE", `/sandboxes/${sandboxId}`)
+          : headers;
+        await daemonFetch(`/sandboxes/${sandboxId}`, { method: "DELETE", headers: deleteHeaders });
       } catch {
         // ignore
       }

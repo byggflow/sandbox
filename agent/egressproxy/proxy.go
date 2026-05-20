@@ -84,6 +84,19 @@ func (s *Server) SetClient(c *phonehome.Client) {
 	s.client.Store(c)
 }
 
+// ClearClientIf nil-stores the current client ONLY if it still equals
+// `expected`. Returns true when the swap happened. Used by handleConn's
+// teardown defer so a new connection's SetClient isn't stomped by the
+// previous connection's defer firing after reconnect/session-replace.
+//
+// Without this, the sequence: old conn installs client A → new conn
+// installs client B → old conn's defer fires and unconditionally
+// SetClient(nil) → egress proxy now has no client, all sandbox HTTP
+// fails with "no active daemon connection" until another reconnect.
+func (s *Server) ClearClientIf(expected *phonehome.Client) bool {
+	return s.client.CompareAndSwap(expected, nil)
+}
+
 // ListenAndServe binds the listener and serves until Close is called. It is
 // non-blocking: returns once the listener is bound and the accept loop has
 // started.

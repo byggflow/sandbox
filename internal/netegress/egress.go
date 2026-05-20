@@ -726,4 +726,3 @@ func portFromURL(u *url.URL) int {
 }
 
 func isPrivateHost(host string) bool { return protocol.IsPrivateHost(host) }
-

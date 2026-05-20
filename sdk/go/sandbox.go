@@ -319,7 +319,7 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 	// the daemon already created — otherwise Create returns an error
 	// while leaving an orphan sandbox alive on the daemon.
 	if opts != nil && opts.Network != nil && len(opts.Network.Egress) > 0 {
-		if err := installNetworkOrCleanup(ctx, sbx, opts); err != nil {
+		if err := installNetworkOrCleanup(ctx, sbx, opts, auth); err != nil {
 			return nil, err
 		}
 	}
@@ -332,7 +332,12 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 // DELETE on the daemon) so the user doesn't end up with an orphan.
 // Cleanup errors are swallowed — the original install failure is what
 // the caller needs to see.
-func installNetworkOrCleanup(ctx context.Context, sbx *Sandbox, opts *Options) error {
+//
+// auth is the original Auth provider. For per-request signers we must
+// re-resolve headers for DELETE /sandboxes/{id}; using the headers
+// resolved for POST /sandboxes won't validate on the DELETE path and
+// the cleanup would silently fail, leaving the sandbox orphaned.
+func installNetworkOrCleanup(ctx context.Context, sbx *Sandbox, opts *Options, auth Auth) error {
 	var failure error
 	switch {
 	case opts.Encrypted:
@@ -354,9 +359,18 @@ func installNetworkOrCleanup(ctx context.Context, sbx *Sandbox, opts *Options) e
 	}
 	_ = sbx.Close()
 	if sbx.httpClient != nil {
-		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, sbx.httpBaseURL+"/sandboxes/"+sbx.ID, nil)
+		deletePath := "/sandboxes/" + sbx.ID
+		// Re-resolve auth for the DELETE path. resolveAuthHeaders
+		// honors RequestSigner; for static-token Auth it returns the
+		// same map either way, so this is cheap.
+		deleteHeaders, hdrErr := resolveAuthHeaders(ctx, auth, http.MethodDelete, deletePath)
+		if hdrErr != nil {
+			// Fall back to the create-time headers — better than nothing.
+			deleteHeaders = sbx.authHeaders
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, sbx.httpBaseURL+deletePath, nil)
 		if err == nil {
-			for k, v := range sbx.authHeaders {
+			for k, v := range deleteHeaders {
 				req.Header.Set(k, v)
 			}
 			if resp, doErr := sbx.httpClient.Do(req); doErr == nil {
