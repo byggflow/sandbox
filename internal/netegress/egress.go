@@ -44,6 +44,10 @@ type Handler struct {
 	caBySbx   map[string]*sandboxca.CA
 	destroyed map[string]struct{}
 
+	// tombstoneTTLOverride lets tests shrink the grace window. nil =>
+	// DefaultTombstoneTTL.
+	tombstoneTTLOverride atomic.Pointer[time.Duration]
+
 	// client is for buffered Handle() — has a 60s overall timeout
 	// because the body is read entirely into memory and we don't
 	// want a slow upstream to leak file descriptors.
@@ -204,15 +208,54 @@ func (h *Handler) SetRules(sandboxID string, rules []netrules.Rule) error {
 }
 
 // ClearRules removes any registered rules for sandboxID and marks the
-// sandbox tombstoned: future EnsureCA calls for this ID will refuse to
-// re-generate, which prevents a racing in-flight CONNECT handler from
-// lazily resurrecting state after teardown.
+// sandbox tombstoned for a short grace period: future EnsureCA calls
+// for this ID will refuse to re-generate, which prevents a racing
+// in-flight CONNECT handler from lazily resurrecting state after
+// teardown. The tombstone is removed via time.AfterFunc once the
+// grace window has elapsed — by then any in-flight request would
+// have completed or been cancelled, and keeping the entry forever
+// would grow the map with the daemon's lifetime sandbox count.
+//
+// Sandbox IDs are random 8-byte hex (sbx-XXXXXXXX), so the chance of
+// reusing one within the grace window is negligible; the grace exists
+// purely to bound the in-flight-request race, not to defend against
+// ID collisions.
 func (h *Handler) ClearRules(sandboxID string) {
 	h.mu.Lock()
 	delete(h.bySandbox, sandboxID)
 	delete(h.caBySbx, sandboxID)
 	h.destroyed[sandboxID] = struct{}{}
 	h.mu.Unlock()
+
+	// Sweep the tombstone after the grace period. AfterFunc runs on a
+	// new goroutine; cheap. Tests can override the duration via
+	// SetTombstoneTTL.
+	time.AfterFunc(h.tombstoneTTL(), func() {
+		h.mu.Lock()
+		delete(h.destroyed, sandboxID)
+		h.mu.Unlock()
+	})
+}
+
+// DefaultTombstoneTTL is how long an EnsureCA call refuses to resurrect
+// a destroyed sandbox's state. Generous enough to outlast any
+// in-flight CONNECT or stream request, short enough that the tombstone
+// map doesn't accumulate over the daemon's lifetime.
+const DefaultTombstoneTTL = 30 * time.Second
+
+// tombstoneTTL returns the configured TTL or DefaultTombstoneTTL.
+// Exists as a method so tests can swap it via SetTombstoneTTL.
+func (h *Handler) tombstoneTTL() time.Duration {
+	if d := h.tombstoneTTLOverride.Load(); d != nil {
+		return *d
+	}
+	return DefaultTombstoneTTL
+}
+
+// SetTombstoneTTL overrides the destroy-tombstone grace period. Test
+// hook — production code should leave the default.
+func (h *Handler) SetTombstoneTTL(d time.Duration) {
+	h.tombstoneTTLOverride.Store(&d)
 }
 
 // ErrSandboxDestroyed is returned by EnsureCA / IssueLeaf when the

@@ -450,7 +450,14 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		EgressProxy:   egressEnabled,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create instance: %w", err)
+		// rt.Create failed AFTER we generated the per-sandbox CA. The
+		// sandbox will never be registered, so OnDestroy won't fire and
+		// the CA + private key would leak in caBySbx for the daemon's
+		// lifetime. Clean up here.
+		if egressEnabled {
+			d.Egress.ClearRules(sbxID)
+		}
+		return nil, fmt.Errorf("creating instance: %w", err)
 	}
 
 	sbx := &Sandbox{
@@ -473,6 +480,13 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		Buffer:      NewNotificationBuffer(),
 	}
 	if err := d.Registry.Add(sbx); err != nil {
+		// Same hazard: rt.Create succeeded but Add failed (duplicate
+		// ID race, ~impossible in practice). Tear down the runtime
+		// instance AND the CA so nothing leaks.
+		_ = rt.Destroy(ctx, inst.ID)
+		if egressEnabled {
+			d.Egress.ClearRules(sbxID)
+		}
 		return nil, err
 	}
 	d.registerSandboxCleanup(sbx)

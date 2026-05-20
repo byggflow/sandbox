@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/byggflow/sandbox/internal/netrules"
 	"github.com/byggflow/sandbox/protocol"
@@ -60,6 +61,41 @@ func TestInjectWinsAgainstSandboxCaseCollision(t *testing.T) {
 			t.Fatalf("iter %d: sandbox value leaked: upstream saw %q (must be daemon-injected)", i, gotAuth)
 		}
 	}
+}
+
+// TestTombstoneExpiresAfterTTL is the regression test for the
+// unbounded-growth bug: after ClearRules, the destroyed set must drop
+// the sandbox ID once the grace window passes, so a long-running
+// daemon doesn't accumulate one tombstone per historical sandbox.
+func TestTombstoneExpiresAfterTTL(t *testing.T) {
+	h := New()
+	defer h.Close()
+	h.SetTombstoneTTL(50 * time.Millisecond)
+
+	// Generate a CA, then destroy: tombstone is set, EnsureCA refuses.
+	if _, err := h.EnsureCA("sbx-test"); err != nil {
+		t.Fatal(err)
+	}
+	h.ClearRules("sbx-test")
+
+	if _, err := h.EnsureCA("sbx-test"); err == nil {
+		t.Error("EnsureCA must refuse immediately after ClearRules (tombstone active)")
+	}
+
+	// After the TTL, the tombstone should be swept and EnsureCA can
+	// re-issue (which is fine — sandbox IDs are random per-create, so
+	// a real re-use is essentially impossible).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		h.mu.RLock()
+		_, stillThere := h.destroyed["sbx-test"]
+		h.mu.RUnlock()
+		if !stillThere {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("tombstone never expired within 2s of a 50ms TTL")
 }
 
 func TestHandleAllowsExplicitlyMatched(t *testing.T) {

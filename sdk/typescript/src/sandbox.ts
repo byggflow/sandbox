@@ -875,6 +875,16 @@ export async function createSandbox(opts?: SandboxOptions): Promise<Sandbox> {
           "network middleware is incompatible with encrypted=true (the daemon needs to read params to apply rules)",
         );
       }
+      if (opts.network.enabled === false) {
+        // The caller asked us NOT to wire the egress proxy/CA, but
+        // also supplied rules. The combination is incoherent: with
+        // the proxy disabled, sandbox-process traffic bypasses the
+        // middleware entirely, and daemon-side net.fetch would still
+        // evaluate rules — surprising and inconsistent.
+        throw new Error(
+          "network.enabled=false is incompatible with network.egress rules; remove one or the other",
+        );
+      }
       await sbx.network.intercept(opts.network.egress);
     } catch (err) {
       // Best-effort cleanup. Close the transport first so the daemon

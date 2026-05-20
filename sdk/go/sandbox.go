@@ -334,10 +334,20 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 // the caller needs to see.
 func installNetworkOrCleanup(ctx context.Context, sbx *Sandbox, opts *Options) error {
 	var failure error
-	if opts.Encrypted {
+	switch {
+	case opts.Encrypted:
 		failure = fmt.Errorf("sandbox: network middleware is incompatible with Encrypted=true (the daemon needs to read params to apply rules)")
-	} else if err := sbx.Net().Intercept(ctx, opts.Network.Egress); err != nil {
-		failure = fmt.Errorf("sandbox: install network rules: %w", err)
+	case opts.Network.Disabled:
+		// Caller asked us NOT to wire the egress proxy/CA but also
+		// supplied rules. The combination is incoherent: with the
+		// proxy disabled, sandbox-process traffic bypasses the
+		// middleware entirely, and daemon-side net.fetch would still
+		// evaluate rules — surprising and inconsistent.
+		failure = fmt.Errorf("sandbox: Network.Disabled=true is incompatible with Network.Egress rules; remove one or the other")
+	default:
+		if err := sbx.Net().Intercept(ctx, opts.Network.Egress); err != nil {
+			failure = fmt.Errorf("sandbox: install network rules: %w", err)
+		}
 	}
 	if failure == nil {
 		return nil
