@@ -17,25 +17,25 @@ import (
 
 // Daemon is the main sandboxd service.
 type Daemon struct {
-	Config    config.Config
-	Runtimes  map[string]runtime.Runtime // keyed by runtime name ("docker", "docker+gvisor", "firecracker")
-	Pool      *pool.Manager
-	Registry  *Registry
+	Config           config.Config
+	Runtimes         map[string]runtime.Runtime // keyed by runtime name ("docker", "docker+gvisor", "firecracker")
+	Pool             *pool.Manager
+	Registry         *Registry
 	Templates        *TemplateRegistry
 	TemplateBackend  TemplateBackend            // Default template backend (Docker).
 	TemplateBackends map[string]TemplateBackend // Per-runtime template backends.
-	Server    *Server
-	Metrics   *Metrics
-	Events    *EventBus
-	Tunnels   *TunnelManager
-	Egress    *netegress.Handler
-	verifier  atomic.Pointer[identity.Verifier] // Non-nil when multi-tenant mode is enabled.
-	AuthLimit   *rateLimiter                    // Rate limiter for failed auth attempts.
-	CreateLimit *rateLimiter                    // Rate limiter for sandbox creation per identity.
-	Log       *slog.Logger
+	Server           *Server
+	Metrics          *Metrics
+	Events           *EventBus
+	Tunnels          *TunnelManager
+	Egress           *netegress.Handler
+	verifier         atomic.Pointer[identity.Verifier] // Non-nil when multi-tenant mode is enabled.
+	AuthLimit        *rateLimiter                      // Rate limiter for failed auth attempts.
+	CreateLimit      *rateLimiter                      // Rate limiter for sandbox creation per identity.
+	Log              *slog.Logger
 
-	ctx       context.Context
-	cancel    context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // New creates a new Daemon instance.
@@ -90,14 +90,14 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		TemplateBackend:  &DockerTemplateBackend{Docker: dockerRT.Client},
 		TemplateBackends: templateBackends,
 		Metrics:          NewMetrics(),
-		Events:          NewEventBus(0),
-		Tunnels:         NewTunnelManager(cfg.Limits.TunnelBindAddress, cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
-		Egress:          netegress.New(),
-		AuthLimit:       newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
-		CreateLimit:     newRateLimiter(cfg.Limits.CreateRateLimit, 1*time.Minute, cfg.Limits.RateLimitEntries),
-		Log:             log,
-		ctx:             ctx,
-		cancel:          cancel,
+		Events:           NewEventBus(0),
+		Tunnels:          NewTunnelManager(cfg.Limits.TunnelBindAddress, cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
+		Egress:           netegress.New(),
+		AuthLimit:        newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
+		CreateLimit:      newRateLimiter(cfg.Limits.CreateRateLimit, 1*time.Minute, cfg.Limits.RateLimitEntries),
+		Log:              log,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	if cfg.MultiTenant.Enabled {
@@ -374,36 +374,42 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	if templateID == "" && req.NetworkMode != "off" {
 		warm, ok := d.Pool.Claim(image)
 		if ok {
+			if warm.Agent != nil {
+				warm.Agent.Close()
+				warm.Agent = nil
+			}
 			sbx := &Sandbox{
-				ID:          sbxID,
-				ContainerID: warm.ContainerID,
-				Image:       image,
-				State:       StateRunning,
-				Identity:    id,
-				IdentityStr: id.Value,
-				AgentAddr:   warm.IP + ":9111",
-				AuthToken:   warm.AuthToken,
-				Created:     time.Now(),
-				TTL:         ttl,
-				Memory:      memory,
-				CPU:         cpu,
-				Profile:     profile,
-				Template:    templateID,
-				Labels:      req.Labels,
-				RuntimeName: runtimeName,
-				Buffer:      NewNotificationBuffer(),
+				ID:            sbxID,
+				ContainerID:   warm.ContainerID,
+				Image:         image,
+				State:         StateRunning,
+				Identity:      id,
+				IdentityStr:   id.Value,
+				AgentAddr:     warm.IP + ":9111",
+				AuthToken:     warm.AuthToken,
+				Created:       time.Now(),
+				TTL:           ttl,
+				Memory:        memory,
+				CPU:           cpu,
+				Profile:       profile,
+				Template:      templateID,
+				Labels:        req.Labels,
+				RuntimeName:   runtimeName,
+				EgressEnabled: true,
+				Buffer:        NewNotificationBuffer(),
 			}
 			if err := d.Registry.Add(sbx); err != nil {
+				d.cleanupClaimedWarm(ctx, rt, warm, "")
 				return nil, err
 			}
-			// Push the per-sandbox CA over the existing authenticated
-			// agent connection. Warm-pool sandboxes don't go through
-			// rt.Create's readiness loop where Docker/Firecracker install
-			// the CA, so we have to do it explicitly on claim.
+			// Push the per-sandbox CA after claim. Warm-pool sandboxes
+			// don't go through rt.Create's readiness loop here, so
+			// Docker/Firecracker can't install this sandbox's CA for us.
 			if err := d.installCAOnWarm(ctx, sbx); err != nil {
 				// Roll the sandbox back rather than expose a broken
 				// network-middleware feature to the user.
 				_ = d.Registry.Remove(sbx.ID)
+				d.cleanupClaimedWarm(ctx, rt, warm, sbx.ID)
 				return nil, fmt.Errorf("installing ca on warm sandbox: %w", err)
 			}
 			d.registerSandboxCleanup(sbx)
@@ -461,23 +467,24 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	}
 
 	sbx := &Sandbox{
-		ID:          sbxID,
-		ContainerID: inst.ID,
-		Image:       image,
-		State:       StateRunning,
-		Identity:    id,
-		IdentityStr: id.Value,
-		AgentAddr:   inst.AgentAddr,
-		AuthToken:   authToken,
-		Created:     time.Now(),
-		TTL:         ttl,
-		Memory:      memory,
-		CPU:         cpu,
-		Profile:     profile,
-		Template:    templateID,
-		Labels:      req.Labels,
-		RuntimeName: runtimeName,
-		Buffer:      NewNotificationBuffer(),
+		ID:            sbxID,
+		ContainerID:   inst.ID,
+		Image:         image,
+		State:         StateRunning,
+		Identity:      id,
+		IdentityStr:   id.Value,
+		AgentAddr:     inst.AgentAddr,
+		AuthToken:     authToken,
+		Created:       time.Now(),
+		TTL:           ttl,
+		Memory:        memory,
+		CPU:           cpu,
+		Profile:       profile,
+		Template:      templateID,
+		Labels:        req.Labels,
+		RuntimeName:   runtimeName,
+		EgressEnabled: egressEnabled,
+		Buffer:        NewNotificationBuffer(),
 	}
 	if err := d.Registry.Add(sbx); err != nil {
 		// Same hazard: rt.Create succeeded but Add failed (duplicate
@@ -500,6 +507,27 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	})
 	d.Log.Info("sandbox created (cold)", "id", sbxID, "container", inst.ID[:12])
 	return sbx, nil
+}
+
+// cleanupClaimedWarm tears down a warm container after Pool.Claim has
+// transferred ownership to CreateSandbox but before the sandbox is fully
+// registered. The pool no longer tracks the container at this point.
+func (d *Daemon) cleanupClaimedWarm(ctx context.Context, rt runtime.Runtime, warm *pool.WarmContainer, sandboxID string) {
+	if warm == nil {
+		return
+	}
+	if warm.Agent != nil {
+		warm.Agent.Close()
+		warm.Agent = nil
+	}
+	if sandboxID != "" && d.Egress != nil {
+		d.Egress.ClearRules(sandboxID)
+	}
+	if rt != nil {
+		if err := rt.Destroy(ctx, warm.ContainerID); err != nil {
+			d.Log.Error("failed to destroy claimed warm container after rollback", "container", warm.ContainerID, "error", err)
+		}
+	}
 }
 
 // registerSandboxCleanup wires per-sandbox subsystem cleanup into the
@@ -738,9 +766,8 @@ type CreateRequest struct {
 	// the trust-bundle env vars so middleware rules apply. "off" skips
 	// all of it: the sandbox dials upstreams directly, no rule
 	// evaluation happens for sandbox-process traffic, no CA is
-	// generated. SDK-mediated sbx.net.fetch() still works (it routes
-	// through the daemon regardless) but rules don't apply to it
-	// either.
+	// generated. SDK-mediated sbx.net.fetch() still works through the
+	// agent fallback, but rules don't apply to it either.
 	NetworkMode string `json:"network_mode,omitempty"`
 }
 

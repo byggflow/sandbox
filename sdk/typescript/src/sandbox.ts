@@ -155,10 +155,8 @@ export interface NetworkConfig {
    * generated or pushed, and sandbox processes dial upstreams
    * directly. Default: true.
    *
-   * `sbx.net.fetch()` still routes through the daemon either way (the
-   * daemon dials on the SDK's behalf for that path), so it works
-   * without the proxy — but no rule evaluation happens for it when
-   * enabled is false.
+   * `sbx.net.fetch()` still works through the agent fallback, but no
+   * rule evaluation happens for it when enabled is false.
    */
   enabled?: boolean;
 }
@@ -601,6 +599,7 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
       // Handler registry: rule ID -> user function. Defer rules carry only
       // their ID over the wire; the function stays in the SDK process.
       const handlers = new Map<string, NetworkHandler>();
+      let ruleQueue: Promise<void> = Promise.resolve();
 
       // Register the dispatcher for incoming net.defer requests. Only
       // wires once per buildSandbox; subsequent intercept() calls just
@@ -664,32 +663,47 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
           params: { rules: current.map(toWireRule) },
         });
       };
+      const enqueueRuleOp = (op: () => Promise<void>): Promise<void> => {
+        const next = ruleQueue.then(op, op);
+        ruleQueue = next.catch(() => undefined);
+        return next;
+      };
 
       return {
         async intercept(rules: NetworkRule[]): Promise<void> {
-          current = rules.slice();
-          await push();
+          return enqueueRuleOp(async () => {
+            current = rules.slice();
+            await push();
+          });
         },
         async deny(host: string): Promise<void> {
-          current.push({ match: { host }, action: "deny" });
-          await push();
+          return enqueueRuleOp(async () => {
+            current.push({ match: { host }, action: "deny" });
+            await push();
+          });
         },
         async allow(host: string): Promise<void> {
-          current.push({ match: { host }, action: "allow" });
-          await push();
+          return enqueueRuleOp(async () => {
+            current.push({ match: { host }, action: "allow" });
+            await push();
+          });
         },
         async inject(host: string, headers: Record<string, string>): Promise<void> {
-          current.push({
-            match: { host },
-            action: "inject",
-            inject: { setHeaders: headers },
+          return enqueueRuleOp(async () => {
+            current.push({
+              match: { host },
+              action: "inject",
+              inject: { setHeaders: headers },
+            });
+            await push();
           });
-          await push();
         },
         async defer(host: string, handler: NetworkHandler, id?: string): Promise<void> {
-          const ruleID = id ?? `defer-${current.length}`;
-          current.push({ id: ruleID, match: { host }, action: "defer", handler });
-          await push();
+          return enqueueRuleOp(async () => {
+            const ruleID = id ?? `defer-${current.length}`;
+            current.push({ id: ruleID, match: { host }, action: "defer", handler });
+            await push();
+          });
         },
       };
     })(),

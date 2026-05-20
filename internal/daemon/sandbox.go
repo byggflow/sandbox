@@ -41,6 +41,10 @@ type Sandbox struct {
 	Template    string            `json:"template,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	RuntimeName string            `json:"runtime,omitempty"` // "docker" or "firecracker"
+	// EgressEnabled records whether the runtime wired this sandbox through
+	// the daemon egress proxy. When false, daemon-side network middleware
+	// must not claim net.fetch or accept rules for this sandbox.
+	EgressEnabled bool `json:"-"`
 
 	// Session tracking.
 	Session *proxy.Session `json:"-"`

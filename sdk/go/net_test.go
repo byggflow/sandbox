@@ -3,7 +3,9 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestNetworkTypesRoundTripJSON(t *testing.T) {
@@ -11,7 +13,7 @@ func TestNetworkTypesRoundTripJSON(t *testing.T) {
 		{ID: "exact", Match: NetworkMatch{Host: "api.openai.com"}, Action: NetworkActionAllow},
 		{Match: NetworkMatch{Host: "*.github.com"}, Action: NetworkActionDeny},
 		{
-			Match: NetworkMatch{Host: "api.example.com", Method: "POST", PathPrefix: "/v1"},
+			Match:  NetworkMatch{Host: "api.example.com", Method: "POST", PathPrefix: "/v1"},
 			Action: NetworkActionInject,
 			Inject: &NetworkInject{SetHeaders: map[string]string{"Authorization": "Bearer x"}},
 		},
@@ -117,3 +119,95 @@ func TestNetCategoryAppendRuleMirrorsRules(t *testing.T) {
 		t.Error("Rules() returned aliasing slice")
 	}
 }
+
+func TestNetCategorySerializesRulePushes(t *testing.T) {
+	tr := &blockingRuleTransport{
+		firstEntered:  make(chan struct{}),
+		secondEntered: make(chan struct{}),
+		releaseFirst:  make(chan struct{}),
+	}
+	n := &NetCategory{cc: &callContext{transport: tr}}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := n.Deny(context.Background(), "a.test"); err != nil {
+			t.Errorf("deny: %v", err)
+		}
+	}()
+
+	<-tr.firstEntered
+	secondStarted := make(chan struct{})
+	go func() {
+		defer wg.Done()
+		close(secondStarted)
+		if err := n.Allow(context.Background(), "b.test"); err != nil {
+			t.Errorf("allow: %v", err)
+		}
+	}()
+	<-secondStarted
+
+	select {
+	case <-tr.secondEntered:
+		t.Fatal("second rule push reached transport before first push completed")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(tr.releaseFirst)
+	wg.Wait()
+
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if len(tr.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(tr.calls))
+	}
+	if len(tr.calls[0]) != 1 || tr.calls[0][0].Action != NetworkActionDeny {
+		t.Fatalf("first snapshot = %+v, want only deny rule", tr.calls[0])
+	}
+	if len(tr.calls[1]) != 2 || tr.calls[1][0].Action != NetworkActionDeny || tr.calls[1][1].Action != NetworkActionAllow {
+		t.Fatalf("second snapshot = %+v, want deny then allow", tr.calls[1])
+	}
+}
+
+type blockingRuleTransport struct {
+	mu            sync.Mutex
+	calls         [][]NetworkRule
+	firstEntered  chan struct{}
+	secondEntered chan struct{}
+	releaseFirst  chan struct{}
+}
+
+func (t *blockingRuleTransport) Call(_ context.Context, _ string, params interface{}) (interface{}, error) {
+	rules := params.(map[string]interface{})["rules"].([]NetworkRule)
+	snapshot := append([]NetworkRule(nil), rules...)
+
+	t.mu.Lock()
+	t.calls = append(t.calls, snapshot)
+	callNum := len(t.calls)
+	t.mu.Unlock()
+
+	switch callNum {
+	case 1:
+		close(t.firstEntered)
+		<-t.releaseFirst
+	case 2:
+		close(t.secondEntered)
+	}
+	return map[string]interface{}{}, nil
+}
+
+func (t *blockingRuleTransport) CallWithBinary(context.Context, string, interface{}, []byte) (interface{}, error) {
+	return nil, nil
+}
+func (t *blockingRuleTransport) CallExpectBinary(context.Context, string, interface{}) (interface{}, [][]byte, error) {
+	return nil, nil, nil
+}
+func (t *blockingRuleTransport) SendBinary(context.Context, []byte) error { return nil }
+func (t *blockingRuleTransport) Notify(context.Context, string, interface{}) error {
+	return nil
+}
+func (t *blockingRuleTransport) OnNotification(NotificationHandler) {}
+func (t *blockingRuleTransport) OnRequest(IncomingRequestHandler)   {}
+func (t *blockingRuleTransport) OnReplaced(ReplacedHandler)         {}
+func (t *blockingRuleTransport) Close() error                       { return nil }

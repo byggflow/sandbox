@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // SandboxStats contains resource usage statistics for a sandbox.
@@ -48,7 +49,8 @@ type Sandbox struct {
 	authHeaders map[string]string
 
 	// Cached NetCategory so the local rules mirror persists across Net() calls.
-	net *NetCategory
+	netOnce sync.Once
+	net     *NetCategory
 }
 
 // FS returns the filesystem category for this sandbox.
@@ -70,7 +72,7 @@ func (s *Sandbox) Env() *EnvCategory {
 // cached on the Sandbox so the rule mirror used by Allow/Deny/Inject
 // persists across calls.
 func (s *Sandbox) Net() *NetCategory {
-	if s.net == nil {
+	s.netOnce.Do(func() {
 		s.net = &NetCategory{
 			cc:          s.cc,
 			httpClient:  s.httpClient,
@@ -78,7 +80,7 @@ func (s *Sandbox) Net() *NetCategory {
 			authHeaders: s.authHeaders,
 			sandboxID:   s.ID,
 		}
-	}
+	})
 	return s.net
 }
 

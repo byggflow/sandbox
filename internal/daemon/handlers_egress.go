@@ -14,7 +14,7 @@ import (
 	"github.com/byggflow/sandbox/protocol"
 )
 
-func base64encode(b []byte) string         { return base64.StdEncoding.EncodeToString(b) }
+func base64encode(b []byte) string          { return base64.StdEncoding.EncodeToString(b) }
 func decodeBase64(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }
 
 // agentLocalMethods is the synchronous claim check for agent->daemon
@@ -55,7 +55,7 @@ func (s *agentStreamSink) End(status byte, errMsg string) error {
 // fs.write / fs.upload / fs.read NEVER appear here because the claim
 // check is methodname-exact and those names aren't in our list, so
 // their JSON+binary frame pairs always go through in order.
-func (d *Daemon) clientLocalMethodsFor(_ string) proxy.MethodSet {
+func (d *Daemon) clientLocalMethodsFor(sbxID string) proxy.MethodSet {
 	return func(method string, params json.RawMessage) bool {
 		switch method {
 		case protocol.OpNetRulesSet:
@@ -67,6 +67,9 @@ func (d *Daemon) clientLocalMethodsFor(_ string) proxy.MethodSet {
 			if d.Egress == nil {
 				return false
 			}
+			if !d.sandboxEgressEnabled(sbxID) {
+				return false
+			}
 			if isEncryptedParams(params) {
 				// Encrypted: forward to agent for E2E-decrypted dispatch.
 				return false
@@ -75,6 +78,17 @@ func (d *Daemon) clientLocalMethodsFor(_ string) proxy.MethodSet {
 		}
 		return false
 	}
+}
+
+func (d *Daemon) sandboxEgressEnabled(sbxID string) bool {
+	if d.Registry == nil {
+		return true
+	}
+	sbx, ok := d.Registry.Get(sbxID)
+	if !ok {
+		return true
+	}
+	return sbx.EgressEnabled
 }
 
 // isEncryptedParams returns true when the JSON payload carries the
@@ -227,6 +241,9 @@ func (d *Daemon) serveRulesSet(_ context.Context, sbxID string, params json.RawM
 	}
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, fmt.Errorf("decoding rules params: %w", err)
+	}
+	if len(req.Rules) > 0 && !d.sandboxEgressEnabled(sbxID) {
+		return nil, fmt.Errorf("net.rules.set is unavailable when network_mode=off")
 	}
 	if err := d.Egress.SetRules(sbxID, req.Rules); err != nil {
 		return nil, fmt.Errorf("installing rules: %w", err)

@@ -96,8 +96,8 @@ type NetworkConfig struct {
 	// Disabled, when true, skips HTTP(S)_PROXY env injection, the
 	// per-sandbox CA push, and the trust-bundle env vars. Sandbox
 	// processes dial upstreams directly; rules don't evaluate for
-	// sandbox-process traffic. sbx.Net().Fetch() still works (it
-	// routes through the daemon either way).
+	// sandbox-process traffic. sbx.Net().Fetch() still works through
+	// the agent fallback, but rules don't apply to it.
 	Disabled bool `json:"-"`
 }
 
@@ -139,9 +139,10 @@ type NetCategory struct {
 
 	// Local mirror of installed rules so Allow/Deny/Inject can append
 	// incrementally without round-tripping the full list from the daemon.
-	rulesMu  sync.Mutex
-	rules    []NetworkRule
-	handlers map[string]NetworkHandler
+	ruleOpsMu sync.Mutex
+	rulesMu   sync.Mutex
+	rules     []NetworkRule
+	handlers  map[string]NetworkHandler
 
 	// deferSeq is an atomic counter used to generate unique fallback
 	// rule IDs for Defer calls that don't supply one. Using
@@ -158,6 +159,9 @@ type NetCategory struct {
 // evaluated on the daemon, so any credentials injected via SetHeaders never
 // enter the sandbox process.
 func (n *NetCategory) Intercept(ctx context.Context, rules []NetworkRule) error {
+	n.ruleOpsMu.Lock()
+	defer n.ruleOpsMu.Unlock()
+
 	n.rulesMu.Lock()
 	n.rules = append(n.rules[:0], rules...)
 	snapshot := append([]NetworkRule(nil), n.rules...)
@@ -212,6 +216,9 @@ func (n *NetCategory) Rules() []NetworkRule {
 }
 
 func (n *NetCategory) appendRule(ctx context.Context, r NetworkRule) error {
+	n.ruleOpsMu.Lock()
+	defer n.ruleOpsMu.Unlock()
+
 	n.rulesMu.Lock()
 	n.rules = append(n.rules, r)
 	snapshot := append([]NetworkRule(nil), n.rules...)

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/byggflow/sandbox/internal/netegress"
+	"github.com/byggflow/sandbox/internal/netrules"
 )
 
 // TestRejectEncryptedParams confirms the daemon refuses E2E-encrypted
@@ -70,4 +71,40 @@ func TestServeRulesSetRefusesEncrypted(t *testing.T) {
 	if !strings.Contains(err.Error(), "encrypted") {
 		t.Errorf("error should explain E2E incompatibility, got: %v", err)
 	}
+}
+
+func TestNetworkModeOffDisablesDaemonEgressHooks(t *testing.T) {
+	d := &Daemon{Egress: netegress.New(), Registry: NewRegistry()}
+	defer d.Egress.Close()
+	if err := d.Registry.Add(&Sandbox{ID: "sbx-off", EgressEnabled: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	owns := d.clientLocalMethodsFor("sbx-off")
+	if owns("net.fetch", json.RawMessage(`{"url":"https://example.com"}`)) {
+		t.Fatal("net.fetch should forward to the agent when network_mode=off")
+	}
+	if !owns("net.rules.set", json.RawMessage(`{"rules":[]}`)) {
+		t.Fatal("net.rules.set should still be claimed so the daemon can reject rule installs")
+	}
+
+	_, err := d.serveRulesSet(context.Background(), "sbx-off", mustJSON(t, map[string]interface{}{
+		"rules": []netrules.Rule{{ID: "deny", Action: netrules.ActionDeny}},
+	}))
+	if err == nil || !strings.Contains(err.Error(), "network_mode=off") {
+		t.Fatalf("expected network_mode=off error, got %v", err)
+	}
+
+	if _, err := d.serveRulesSet(context.Background(), "sbx-off", json.RawMessage(`{"rules":[]}`)); err != nil {
+		t.Fatalf("clearing rules should remain allowed: %v", err)
+	}
+}
+
+func mustJSON(t *testing.T, v interface{}) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
