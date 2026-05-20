@@ -163,10 +163,16 @@ func (n *NetCategory) Intercept(ctx context.Context, rules []NetworkRule) error 
 	defer n.ruleOpsMu.Unlock()
 
 	n.rulesMu.Lock()
+	oldRules := append([]NetworkRule(nil), n.rules...)
+	oldHandlers := copyHandlers(n.handlers)
 	n.rules = append(n.rules[:0], rules...)
 	snapshot := append([]NetworkRule(nil), n.rules...)
 	n.rulesMu.Unlock()
-	return n.pushRules(ctx, snapshot)
+	if err := n.pushRules(ctx, snapshot); err != nil {
+		n.restoreRules(oldRules, oldHandlers)
+		return err
+	}
+	return nil
 }
 
 // Allow appends an allow rule for the given host glob.
@@ -220,10 +226,40 @@ func (n *NetCategory) appendRule(ctx context.Context, r NetworkRule) error {
 	defer n.ruleOpsMu.Unlock()
 
 	n.rulesMu.Lock()
+	oldRules := append([]NetworkRule(nil), n.rules...)
+	oldHandlers := copyHandlers(n.handlers)
 	n.rules = append(n.rules, r)
 	snapshot := append([]NetworkRule(nil), n.rules...)
 	n.rulesMu.Unlock()
-	return n.pushRules(ctx, snapshot)
+	if err := n.pushRules(ctx, snapshot); err != nil {
+		n.restoreRules(oldRules, oldHandlers)
+		return err
+	}
+	return nil
+}
+
+// restoreRules rolls n.rules and n.handlers back to the snapshot taken
+// before a mutating op. Called when the daemon rejects net.rules.set —
+// otherwise the local mirror diverges from what the daemon actually
+// has installed, and subsequent helpers re-push the bad ruleset while
+// net.defer dispatches miss handlers the daemon never registered.
+func (n *NetCategory) restoreRules(rules []NetworkRule, handlers map[string]NetworkHandler) {
+	n.rulesMu.Lock()
+	n.rules = rules
+	n.handlers = handlers
+	n.rulesMu.Unlock()
+}
+
+// copyHandlers returns a shallow clone of h. Caller must hold rulesMu.
+func copyHandlers(h map[string]NetworkHandler) map[string]NetworkHandler {
+	if h == nil {
+		return nil
+	}
+	out := make(map[string]NetworkHandler, len(h))
+	for k, v := range h {
+		out[k] = v
+	}
+	return out
 }
 
 func (n *NetCategory) pushRules(ctx context.Context, rules []NetworkRule) error {

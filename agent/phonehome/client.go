@@ -83,10 +83,16 @@ func (c *Client) Call(method string, params interface{}, timeout time.Duration) 
 		return nil, fmt.Errorf("write frame: %w", err)
 	}
 
+	// Use a stoppable timer: time.After leaks a goroutine + Timer
+	// struct until expiry (up to 60s per egress dispatch) even after
+	// the response or close already returned. Same pattern the daemon-
+	// side proxy.CallClient uses.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case resp := <-ch:
 		return resp, nil
-	case <-time.After(timeout):
+	case <-timer.C:
 		return nil, fmt.Errorf("phonehome: timeout after %s", timeout)
 	}
 }
