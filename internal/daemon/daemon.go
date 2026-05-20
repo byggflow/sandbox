@@ -489,8 +489,14 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	if err := d.Registry.Add(sbx); err != nil {
 		// Same hazard: rt.Create succeeded but Add failed (duplicate
 		// ID race, ~impossible in practice). Tear down the runtime
-		// instance AND the CA so nothing leaks.
-		_ = rt.Destroy(ctx, inst.ID)
+		// instance AND the CA so nothing leaks. Use a detached
+		// context: the caller's ctx may already be cancelled (which
+		// is exactly the path that would cause Add to fail in the
+		// first place), and a cancelled rt.Destroy leaves the
+		// container + agent + ports running forever.
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = rt.Destroy(destroyCtx, inst.ID)
+		cancel()
 		if egressEnabled {
 			d.Egress.ClearRules(sbxID)
 		}
@@ -524,9 +530,15 @@ func (d *Daemon) cleanupClaimedWarm(ctx context.Context, rt runtime.Runtime, war
 		d.Egress.ClearRules(sandboxID)
 	}
 	if rt != nil {
-		if err := rt.Destroy(ctx, warm.ContainerID); err != nil {
+		// Detached context: this rollback path runs precisely when the
+		// caller's ctx may have been cancelled (e.g. the request
+		// timed out). Inheriting that cancellation skips Destroy and
+		// leaks the container + agent + ports.
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := rt.Destroy(destroyCtx, warm.ContainerID); err != nil {
 			d.Log.Error("failed to destroy claimed warm container after rollback", "container", warm.ContainerID, "error", err)
 		}
+		cancel()
 	}
 }
 

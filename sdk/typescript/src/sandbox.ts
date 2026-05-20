@@ -723,8 +723,14 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
                 throw new Error("network.intercept: defer rules require an id");
               }
             }
+            const snapshot = current.slice();
             current = rules.slice();
-            await push();
+            // Roll back if the daemon rejects the new rule set; the
+            // other mutators (deny/allow/inject/defer) already use
+            // pushOrRollback for the same reason — without this an
+            // intercept() that fails server-side leaves `current`
+            // diverged from what the daemon actually has installed.
+            await pushOrRollback(snapshot);
           });
         },
         async deny(host: string): Promise<void> {

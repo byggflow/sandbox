@@ -86,7 +86,11 @@ func (d *Daemon) sandboxEgressEnabled(sbxID string) bool {
 	}
 	sbx, ok := d.Registry.Get(sbxID)
 	if !ok {
-		return true
+		// Fail closed: an RPC referencing a sandbox the daemon has
+		// no record of must not be allowed to provision egress state
+		// (per-sandbox CA, rules, etc.). Previously returned true,
+		// which let unknown-ID RPCs lazily create state.
+		return false
 	}
 	return sbx.EgressEnabled
 }
@@ -190,6 +194,12 @@ func (d *Daemon) makeDeferFunc(sess *proxy.Session) netegress.DeferFunc {
 // per-sandbox CA. The agent calls this from its CONNECT handler to
 // terminate TLS for MITM interception.
 func (d *Daemon) serveLeafCert(sbxID string, params json.RawMessage) (interface{}, error) {
+	// Gate on egress enabled: a network_mode=off sandbox must not be
+	// able to lazily provision a per-sandbox CA via OpNetCertLeaf.
+	// The documented contract says no egress state exists for these.
+	if !d.sandboxEgressEnabled(sbxID) {
+		return nil, fmt.Errorf("leaf cert: egress disabled for sandbox")
+	}
 	var req protocol.LeafCertRequest
 	if err := json.Unmarshal(params, &req); err != nil {
 		return nil, fmt.Errorf("decode leaf cert params: %w", err)

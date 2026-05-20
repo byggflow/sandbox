@@ -161,10 +161,15 @@ func (s *Session) CallClient(ctx context.Context, method string, params interfac
 		return nil, fmt.Errorf("send client request: %w", err)
 	}
 
+	// Use a stoppable timer: time.After leaks until expiry (up to 60s
+	// per defer RPC), pinning a goroutine and Timer struct even after
+	// the response or session close already returned.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case resp := <-ch:
 		return resp, nil
-	case <-time.After(timeout):
+	case <-timer.C:
 		return nil, fmt.Errorf("client request timed out after %s", timeout)
 	case <-ctx.Done():
 		return nil, ctx.Err()

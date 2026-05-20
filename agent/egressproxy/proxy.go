@@ -110,6 +110,12 @@ func (s *Server) ClearClientIf(expected *phonehome.Client) bool {
 // stalled sandbox client can't hold a goroutine open indefinitely.
 const keepAliveReadTimeout = 30 * time.Second
 
+// tlsHandshakeTimeout bounds the TLS handshake the agent performs
+// with the sandbox client after CONNECT. Hijacking the conn removes
+// the http.Server's context-driven cancellation, so without this a
+// stalled client could pin a goroutine + FD forever.
+const tlsHandshakeTimeout = 15 * time.Second
+
 // ListenAndServe binds the listener and serves until Close is called. It is
 // non-blocking: returns once the listener is bound and the accept loop has
 // started.
@@ -331,8 +337,21 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Certificates: []tls.Certificate{leaf},
 		MinVersion:   tls.VersionTLS12,
 	})
+	// HandshakeContext only watches r.Context(), and once we Hijacked
+	// the conn the http.Server stops cancelling that context — so a
+	// sandbox client that opens CONNECT and then sits silent would
+	// stall here indefinitely. Bound the handshake with a deadline on
+	// the underlying conn.
+	if err := clientConn.SetDeadline(time.Now().Add(tlsHandshakeTimeout)); err != nil {
+		s.log.Debug("egress: set tls handshake deadline", "error", err)
+		return
+	}
 	if err := tlsConn.HandshakeContext(r.Context()); err != nil {
 		s.log.Warn("egress: tls handshake with sandbox", "host", connectHost, "error", err)
+		return
+	}
+	if err := clientConn.SetDeadline(time.Time{}); err != nil {
+		s.log.Debug("egress: clear tls handshake deadline", "error", err)
 		return
 	}
 	defer tlsConn.Close()

@@ -214,7 +214,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		switch frame.Type {
 		case proto.FramePing:
 			if len(frame.Payload) == 1 && frame.Payload[0] == proto.PingRequest {
-				if err := codec.WritePong(conn); err != nil {
+				// Use rw (write-serialized) instead of raw conn so the
+				// pong doesn't interleave with concurrent phonehome /
+				// streaming / JSON-RPC frames.
+				if err := codec.WritePong(rw); err != nil {
 					slog.Error("write pong error", "error", err)
 					return
 				}

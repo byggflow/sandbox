@@ -441,6 +441,7 @@ func (h *Handler) prepareUpstream(ctx context.Context, sandboxID string, req *pr
 			return prepResult{Synthetic: dResp.Response, MatchedID: matched.ID}
 		}
 		if dResp != nil && dResp.Request != nil {
+			originalHost := parsed.Hostname()
 			req = dResp.Request
 			parsed, err = url.Parse(req.URL)
 			if err != nil {
@@ -459,6 +460,28 @@ func (h *Handler) prepareUpstream(ctx context.Context, sandboxID string, req *pr
 			method = strings.ToUpper(req.Method)
 			if method == "" {
 				method = "GET"
+			}
+			// If the handler rewrote to a different host, the original
+			// matched rule's grants (allow-private dial, Inject if
+			// the original were an inject rule) must NOT carry over —
+			// the new host has to satisfy its own rules. Re-match
+			// against the rewritten URL; treat a new defer match as
+			// "no rule" to avoid recursing into another handler call.
+			if parsed.Hostname() != originalHost {
+				newMatched := h.matchRule(sandboxID, parsed, method)
+				if newMatched != nil && newMatched.Action == netrules.ActionDeny {
+					h.denied.Add(1)
+					resp := synthetic(403, "defer rewrite blocked by egress rule "+newMatched.ID)
+					resp.MatchedRuleID = newMatched.ID
+					return prepResult{Synthetic: resp, MatchedID: newMatched.ID}
+				}
+				if newMatched != nil && newMatched.Action == netrules.ActionDefer {
+					// Don't recurse into another defer; drop to "no
+					// rule" so the private-host fast-path applies
+					// and allow-private isn't granted.
+					newMatched = nil
+				}
+				matched = newMatched
 			}
 		}
 	}

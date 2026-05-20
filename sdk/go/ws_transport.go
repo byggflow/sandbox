@@ -266,15 +266,24 @@ func (t *wsTransport) serveIncomingRequest(id int64, method string, params json.
 		out.Error = &jsonRPCError{Code: -32601, Message: "method not found: " + method}
 	} else {
 		result, err := h(context.Background(), method, params)
-		if err != nil {
+		switch {
+		case err != nil:
 			out.Error = &jsonRPCError{Code: -32000, Message: err.Error()}
-		} else if result != nil {
+		case result != nil:
 			raw, mErr := json.Marshal(result)
 			if mErr != nil {
 				out.Error = &jsonRPCError{Code: -32000, Message: "marshal result: " + mErr.Error()}
 			} else {
 				out.Result = raw
 			}
+		default:
+			// Handler signaled "I don't serve this method" via the
+			// (nil, nil) sentinel (e.g. dispatchDefer for any
+			// method != net.defer). Returning a response with
+			// neither result nor error is invalid JSON-RPC 2.0; the
+			// peer's decoder will reject it. Emit a proper method-
+			// not-found error instead.
+			out.Error = &jsonRPCError{Code: -32601, Message: "method not found: " + method}
 		}
 	}
 	data, err := json.Marshal(out)
