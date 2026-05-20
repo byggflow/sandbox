@@ -75,6 +75,27 @@ func TestRegexHost(t *testing.T) {
 	}
 }
 
+// TestRegexHostPreservesNegatedClasses guards against the bug where
+// Compile lowercased the entire host string (including the regex
+// body) before extracting it — which silently flipped negated escape
+// semantics (\D → \d, \S → \s, \W → \w). The pattern below uses \D
+// so a non-digit host like "api.example.test" must match; if the
+// body got lowercased, \D becomes \d and the match would fail.
+func TestRegexHostPreservesNegatedClasses(t *testing.T) {
+	c, err := Compile([]Rule{
+		{Match: Match{Host: `/^api\.\D+\.test$/`}, Action: ActionDeny},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Match("api.example.test", 443, "GET", "/"); r == nil || r.Action != ActionDeny {
+		t.Errorf("expected deny via \\D regex, got %v", r)
+	}
+	if r := c.Match("api.123.test", 443, "GET", "/"); r != nil {
+		t.Errorf("expected no match for digit segment (\\D excludes digits), got %v", r)
+	}
+}
+
 func TestInvalidRegex(t *testing.T) {
 	_, err := Compile([]Rule{
 		{Match: Match{Host: "/[/"}, Action: ActionAllow},

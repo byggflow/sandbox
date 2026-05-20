@@ -446,6 +446,16 @@ func (h *Handler) prepareUpstream(ctx context.Context, sandboxID string, req *pr
 			if err != nil {
 				return prepResult{Synthetic: synthetic(400, "defer handler returned invalid url: "+err.Error()), MatchedID: matched.ID}
 			}
+			// Re-validate the scheme: a handler can return file://,
+			// ftp://, or "" and bypass the initial http/https guard
+			// above. Without this check we'd hand a non-HTTP request
+			// to the transport and either crash or dial the wrong
+			// protocol.
+			if parsed.Scheme != "http" && parsed.Scheme != "https" {
+				out := synthetic(400, "defer handler returned unsupported scheme: "+parsed.Scheme)
+				out.MatchedRuleID = matched.ID
+				return prepResult{Synthetic: out, MatchedID: matched.ID}
+			}
 			method = strings.ToUpper(req.Method)
 			if method == "" {
 				method = "GET"

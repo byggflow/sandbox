@@ -635,6 +635,20 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
           body: p.request.body ?? "",
         };
         const result = await fn(reqIn);
+        // Match the Go SDK: a null/undefined/empty return is "no-op,
+        // continue with the original request". Without this branch,
+        // every other valid handler shape would crash with a
+        // TypeError on undefined property access.
+        if (result == null || (typeof result === "object" && !("response" in result) && !("request" in result))) {
+          return {
+            request: {
+              method: p.request.method,
+              url: p.request.url,
+              headers: p.request.headers,
+              body: p.request.body ?? "",
+            },
+          };
+        }
         if ("response" in result && result.response) {
           return {
             response: {
@@ -675,6 +689,28 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
         return next;
       };
 
+      // pushOrRollback restores `current` (and the handlers registry it
+      // drives) if push() throws — otherwise a failed daemon RPC or a
+      // bad rule leaves the local mirror diverged from what the daemon
+      // actually has installed, and every subsequent op sees stale
+      // state.
+      const pushOrRollback = async (snapshot: NetworkRule[]) => {
+        try {
+          await push();
+        } catch (err) {
+          current = snapshot;
+          // Re-sync handlers to the restored rules so the dispatcher
+          // doesn't keep a handler for a rule the daemon never saw.
+          handlers.clear();
+          for (const r of current) {
+            if (r.action === "defer" && r.handler && r.id) {
+              handlers.set(r.id, r.handler);
+            }
+          }
+          throw err;
+        }
+      };
+
       return {
         async intercept(rules: NetworkRule[]): Promise<void> {
           return enqueueRuleOp(async () => {
@@ -693,31 +729,35 @@ function buildSandbox(id: string, transport: RpcTransport, daemonFetch: DaemonFe
         },
         async deny(host: string): Promise<void> {
           return enqueueRuleOp(async () => {
+            const snapshot = current.slice();
             current.push({ match: { host }, action: "deny" });
-            await push();
+            await pushOrRollback(snapshot);
           });
         },
         async allow(host: string): Promise<void> {
           return enqueueRuleOp(async () => {
+            const snapshot = current.slice();
             current.push({ match: { host }, action: "allow" });
-            await push();
+            await pushOrRollback(snapshot);
           });
         },
         async inject(host: string, headers: Record<string, string>): Promise<void> {
           return enqueueRuleOp(async () => {
+            const snapshot = current.slice();
             current.push({
               match: { host },
               action: "inject",
               inject: { setHeaders: headers },
             });
-            await push();
+            await pushOrRollback(snapshot);
           });
         },
         async defer(host: string, handler: NetworkHandler, id?: string): Promise<void> {
           return enqueueRuleOp(async () => {
+            const snapshot = current.slice();
             const ruleID = id ?? `defer-${++deferSeq}`;
             current.push({ id: ruleID, match: { host }, action: "defer", handler });
-            await push();
+            await pushOrRollback(snapshot);
           });
         },
       };

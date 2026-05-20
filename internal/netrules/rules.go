@@ -106,23 +106,34 @@ func Compile(rules []Rule) (*Compiled, error) {
 			cr.methodSet = parseMethods(r.Match.Method)
 		}
 
-		host := strings.ToLower(r.Match.Host)
+		// Detect the /regex/ form on the raw host string. Lowercasing
+		// before extracting the body would silently invert negated
+		// character-class escapes (\D → \d, \S → \s, \W → \w) and fold
+		// [A-Z] to [a-z], producing a different regex than the author
+		// wrote.
+		rawHost := r.Match.Host
 		switch {
-		case host == "":
+		case rawHost == "":
 			// Any-host rule. Park it in regex tail with a match-all.
 			cr.hostRegex = anyHostRegex
 			c.regex = append(c.regex, cr)
-		case strings.HasPrefix(host, "/") && strings.HasSuffix(host, "/") && len(host) > 1:
-			re, err := regexp.Compile(host[1 : len(host)-1])
+		case strings.HasPrefix(rawHost, "/") && strings.HasSuffix(rawHost, "/") && len(rawHost) > 1:
+			// Wrap with (?i) so the regex matches against the
+			// lowercased host passed to Match() regardless of the
+			// author's casing — Match() always lowercases the host
+			// before comparing.
+			body := rawHost[1 : len(rawHost)-1]
+			re, err := regexp.Compile("(?i)" + body)
 			if err != nil {
 				return nil, fmt.Errorf("rule %d: invalid host regex: %w", i, err)
 			}
 			cr.hostRegex = re
 			c.regex = append(c.regex, cr)
-		case strings.HasPrefix(host, "*."):
-			suffix := host[1:] // includes leading dot, e.g. ".openai.com"
+		case strings.HasPrefix(rawHost, "*."):
+			suffix := strings.ToLower(rawHost[1:]) // includes leading dot, e.g. ".openai.com"
 			c.suffix.insert(suffix, cr)
 		default:
+			host := strings.ToLower(rawHost)
 			c.exact[host] = append(c.exact[host], cr)
 		}
 	}

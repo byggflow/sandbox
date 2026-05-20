@@ -67,6 +67,15 @@ func (c *Client) Call(method string, params interface{}, timeout time.Duration) 
 	c.pending.Store(id, ch)
 	defer c.pending.Delete(id)
 
+	// Re-check closed AFTER Store: without this, a Close() that ran
+	// its Range between the initial closed.Load and the Store above
+	// would leave this entry stranded — no Deliver, no Close sweep,
+	// the call blocks until timeout (up to 60s) and the goroutine
+	// + pending map entry leak that whole time.
+	if c.closed.Load() {
+		return nil, errors.New("phonehome: client closed")
+	}
+
 	c.mu.Lock()
 	err = codec.WriteFrame(c.w, protocol.FrameJSON, payload)
 	c.mu.Unlock()
