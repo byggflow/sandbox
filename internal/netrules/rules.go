@@ -73,9 +73,9 @@ type Rule struct {
 // Compiled is the data structure the daemon's hot path queries.
 // It is built from a []Rule via Compile and is immutable after construction.
 type Compiled struct {
-	exact  map[string][]*compiledRule  // host -> rules in priority order
-	suffix *suffixTrie                  // host suffix -> rules
-	regex  []*compiledRule              // ordered regex rules
+	exact  map[string][]*compiledRule // host -> rules in priority order
+	suffix *suffixTrie                // host suffix -> rules
+	regex  []*compiledRule            // ordered regex rules
 }
 
 type compiledRule struct {
@@ -96,6 +96,9 @@ func Compile(rules []Rule) (*Compiled, error) {
 	for i := range rules {
 		r := rules[i]
 		r.Priority = i
+		if !validAction(r.Action) {
+			return nil, fmt.Errorf("rule %d: invalid action %q", i, r.Action)
+		}
 
 		cr := &compiledRule{rule: &r}
 
@@ -130,6 +133,15 @@ func Compile(rules []Rule) (*Compiled, error) {
 		sortByPriority(c.exact[h])
 	}
 	return c, nil
+}
+
+func validAction(a Action) bool {
+	switch a {
+	case ActionAllow, ActionDeny, ActionInject, ActionDefer:
+		return true
+	default:
+		return false
+	}
 }
 
 // anyHostRegex matches any host. Used for host=="" rules.

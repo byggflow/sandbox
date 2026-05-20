@@ -142,17 +142,18 @@ func (d *Daemon) serveEgressStream(ctx context.Context, sbxID string, deferFn ne
 	}
 
 	sink := &agentStreamSink{sess: sess, streamID: req.StreamID}
-	// Copy body asynchronously: we want the JSON response (head) to
-	// return now so the agent can start writing the HTTP response to
-	// the sandbox client before the upstream body is done.
-	go func() {
-		if err := copier(sink); err != nil {
-			// copier always emits a terminal End; this branch covers
-			// pathological cases where sink.End itself failed.
-			d.Log.Debug("stream egress body copy", "stream_id", req.StreamID, "error", err)
-		}
-	}()
-	return head, nil
+	return &proxy.LocalResponse{
+		Result: head,
+		AfterWrite: func() {
+			go func() {
+				if err := copier(sink); err != nil {
+					// copier always emits a terminal End; this branch covers
+					// pathological cases where sink.End itself failed.
+					d.Log.Debug("stream egress body copy", "stream_id", req.StreamID, "error", err)
+				}
+			}()
+		},
+	}, nil
 }
 
 // makeDeferFunc builds the DeferFunc that the egress handler invokes when

@@ -19,6 +19,15 @@ import (
 // Claims check is supposed to be the only place that decides ownership.
 type LocalHandler func(ctx context.Context, method string, params json.RawMessage) (interface{}, error)
 
+// LocalResponse lets a handler return a JSON-RPC result plus work that
+// must begin only after the response has been written to the originating
+// side. Streaming handlers use this to avoid sending follow-up frames
+// before the caller has received the stream head.
+type LocalResponse struct {
+	Result     interface{}
+	AfterWrite func()
+}
+
 // MethodSet is a synchronous "do I own this method?" check. It must be
 // fast and side-effect-free — it runs in the WebSocket read loop before
 // any goroutine is spawned. Methods that aren't claimed flow through
@@ -345,6 +354,13 @@ func (s *Session) maybeServeLocal(payload []byte, handler LocalHandler, owns Met
 	id := protocol.DecodeID(env.ID)
 	go func(method string, params json.RawMessage, id int) {
 		result, err := handler(s.ctx, method, params)
+		var afterWrite func()
+		if err == nil {
+			if lr, ok := result.(*LocalResponse); ok {
+				result = lr.Result
+				afterWrite = lr.AfterWrite
+			}
+		}
 		resp := protocol.Response{JSONRPC: "2.0", ID: id}
 		if err != nil {
 			resp.Error = &protocol.RPCError{Code: -32000, Message: err.Error()}
@@ -358,6 +374,10 @@ func (s *Session) maybeServeLocal(payload []byte, handler LocalHandler, owns Met
 		}
 		if writeErr := s.writeLocalResponse(side, data); writeErr != nil {
 			s.log.Error("write "+side+"-request response", "error", writeErr)
+			return
+		}
+		if afterWrite != nil {
+			afterWrite()
 		}
 	}(env.Method, env.Params, id)
 	return true

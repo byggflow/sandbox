@@ -84,6 +84,20 @@ func TestInvalidRegex(t *testing.T) {
 	}
 }
 
+func TestInvalidAction(t *testing.T) {
+	for _, action := range []Action{"", "denny"} {
+		_, err := Compile([]Rule{
+			{Match: Match{Host: "api.example.com"}, Action: action},
+		})
+		if err == nil {
+			t.Fatalf("expected compile error for action %q", action)
+		}
+		if !strings.Contains(err.Error(), "invalid action") {
+			t.Fatalf("error should name invalid action, got: %v", err)
+		}
+	}
+}
+
 func TestMethodAndPath(t *testing.T) {
 	c, err := Compile([]Rule{
 		{Match: Match{Host: "api.example.com", Method: "POST", PathPrefix: "/v1/secret"}, Action: ActionDeny},

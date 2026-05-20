@@ -101,6 +101,91 @@ func TestAgentRequestHookServesLocally(t *testing.T) {
 	}
 }
 
+func TestAgentRequestAfterWriteRunsAfterResponseFrame(t *testing.T) {
+	agentSide, daemonAgentSide := net.Pipe()
+	defer agentSide.Close()
+	defer daemonAgentSide.Close()
+
+	agent := Wrap(daemonAgentSide)
+
+	hookCalled := make(chan struct{}, 1)
+	afterCalled := make(chan struct{}, 1)
+	hooks := Hooks{
+		AgentRequest: func(_ context.Context, _ string, _ json.RawMessage) (interface{}, error) {
+			hookCalled <- struct{}{}
+			return &LocalResponse{
+				Result:     map[string]string{"status": "ok"},
+				AfterWrite: func() { afterCalled <- struct{}{} },
+			}, nil
+		},
+		AgentRequestMethods: func(method string, _ json.RawMessage) bool { return method == "net.egress.stream" },
+	}
+
+	s := &Session{
+		agent: agent,
+		log:   slog.Default(),
+		ctx:   context.Background(),
+	}
+	s.SetHooks(hooks)
+
+	errc := make(chan error, 1)
+	go func() {
+		errc <- s.agentToClient()
+	}()
+
+	req := protocol.Request{JSONRPC: "2.0", ID: 1, Method: "net.egress.stream", Params: map[string]string{"url": "https://example.com"}}
+	payload, _ := json.Marshal(req)
+	writeFrame(t, agentSide, protocol.FrameJSON, payload)
+
+	select {
+	case <-hookCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook never invoked")
+	}
+
+	select {
+	case <-afterCalled:
+		t.Fatal("after-write callback ran before response frame was read")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	readFrame := func() (byte, []byte) {
+		var hdr [5]byte
+		if _, err := io.ReadFull(agentSide, hdr[:]); err != nil {
+			t.Fatalf("read header: %v", err)
+		}
+		length := int(hdr[1])<<24 | int(hdr[2])<<16 | int(hdr[3])<<8 | int(hdr[4])
+		buf := make([]byte, length)
+		if _, err := io.ReadFull(agentSide, buf); err != nil {
+			t.Fatalf("read payload: %v", err)
+		}
+		return hdr[0], buf
+	}
+	frameType, payload := readFrame()
+	if frameType != protocol.FrameJSON {
+		t.Fatalf("expected JSON response frame, got 0x%02x", frameType)
+	}
+	var resp protocol.Response
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %v", resp.Error)
+	}
+
+	select {
+	case <-afterCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("after-write callback did not run after response frame")
+	}
+
+	daemonAgentSide.Close()
+	select {
+	case <-errc:
+	case <-time.After(time.Second):
+	}
+}
+
 // TestAgentRequestHookFallsThrough verifies that a hook returning (nil, nil)
 // causes the original request to be forwarded to the WebSocket as before.
 // We don't run the WS read here — we just confirm the hook is exercised
