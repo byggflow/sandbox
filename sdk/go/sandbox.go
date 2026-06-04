@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // SandboxStats contains resource usage statistics for a sandbox.
@@ -46,6 +47,10 @@ type Sandbox struct {
 	httpClient  *http.Client
 	httpBaseURL string
 	authHeaders map[string]string
+
+	// Cached NetCategory so the local rules mirror persists across Net() calls.
+	netOnce sync.Once
+	net     *NetCategory
 }
 
 // FS returns the filesystem category for this sandbox.
@@ -63,15 +68,20 @@ func (s *Sandbox) Env() *EnvCategory {
 	return &EnvCategory{cc: s.cc}
 }
 
-// Net returns the network category for this sandbox.
+// Net returns the network category for this sandbox. The NetCategory is
+// cached on the Sandbox so the rule mirror used by Allow/Deny/Inject
+// persists across calls.
 func (s *Sandbox) Net() *NetCategory {
-	return &NetCategory{
-		cc:          s.cc,
-		httpClient:  s.httpClient,
-		httpBaseURL: s.httpBaseURL,
-		authHeaders: s.authHeaders,
-		sandboxID:   s.ID,
-	}
+	s.netOnce.Do(func() {
+		s.net = &NetCategory{
+			cc:          s.cc,
+			httpClient:  s.httpClient,
+			httpBaseURL: s.httpBaseURL,
+			authHeaders: s.authHeaders,
+			sandboxID:   s.ID,
+		}
+	})
+	return s.net
 }
 
 // Template returns the template category for this sandbox.
@@ -203,6 +213,9 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 		if len(opts.Labels) > 0 {
 			body["labels"] = opts.Labels
 		}
+		if opts.Network != nil && opts.Network.Disabled {
+			body["network_mode"] = "off"
+		}
 	}
 
 	bodyJSON, err := json.Marshal(body)
@@ -301,7 +314,73 @@ func Create(ctx context.Context, opts *Options) (*Sandbox, error) {
 		httpBaseURL: baseURL,
 		authHeaders: headers,
 	}
+
+	// Install any rules supplied via opts.Network.Egress before
+	// returning. If anything throws here (encrypted+rules conflict,
+	// daemon rejection, transport error), we MUST destroy the sandbox
+	// the daemon already created — otherwise Create returns an error
+	// while leaving an orphan sandbox alive on the daemon.
+	if opts != nil && opts.Network != nil && len(opts.Network.Egress) > 0 {
+		if err := installNetworkOrCleanup(ctx, sbx, opts, auth); err != nil {
+			return nil, err
+		}
+	}
+
 	return sbx, nil
+}
+
+// installNetworkOrCleanup tries to install the configured network
+// rules; on any failure it tears down the sandbox (close transport +
+// DELETE on the daemon) so the user doesn't end up with an orphan.
+// Cleanup errors are swallowed — the original install failure is what
+// the caller needs to see.
+//
+// auth is the original Auth provider. For per-request signers we must
+// re-resolve headers for DELETE /sandboxes/{id}; using the headers
+// resolved for POST /sandboxes won't validate on the DELETE path and
+// the cleanup would silently fail, leaving the sandbox orphaned.
+func installNetworkOrCleanup(ctx context.Context, sbx *Sandbox, opts *Options, auth Auth) error {
+	var failure error
+	switch {
+	case opts.Encrypted:
+		failure = fmt.Errorf("sandbox: network middleware is incompatible with Encrypted=true (the daemon needs to read params to apply rules)")
+	case opts.Network.Disabled:
+		// Caller asked us NOT to wire the egress proxy/CA but also
+		// supplied rules. The combination is incoherent: with the
+		// proxy disabled, sandbox-process traffic bypasses the
+		// middleware entirely, and daemon-side net.fetch would still
+		// evaluate rules — surprising and inconsistent.
+		failure = fmt.Errorf("sandbox: Network.Disabled=true is incompatible with Network.Egress rules; remove one or the other")
+	default:
+		if err := sbx.Net().Intercept(ctx, opts.Network.Egress); err != nil {
+			failure = fmt.Errorf("sandbox: install network rules: %w", err)
+		}
+	}
+	if failure == nil {
+		return nil
+	}
+	_ = sbx.Close()
+	if sbx.httpClient != nil {
+		deletePath := "/sandboxes/" + sbx.ID
+		// Re-resolve auth for the DELETE path. resolveAuthHeaders
+		// honors RequestSigner; for static-token Auth it returns the
+		// same map either way, so this is cheap.
+		deleteHeaders, hdrErr := resolveAuthHeaders(ctx, auth, http.MethodDelete, deletePath)
+		if hdrErr != nil {
+			// Fall back to the create-time headers — better than nothing.
+			deleteHeaders = sbx.authHeaders
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, sbx.httpBaseURL+deletePath, nil)
+		if err == nil {
+			for k, v := range deleteHeaders {
+				req.Header.Set(k, v)
+			}
+			if resp, doErr := sbx.httpClient.Do(req); doErr == nil {
+				resp.Body.Close()
+			}
+		}
+	}
+	return failure
 }
 
 // buildWSURL constructs the WebSocket URL for a sandbox.

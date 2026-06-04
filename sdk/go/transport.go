@@ -1,9 +1,18 @@
 package sandbox
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // NotificationHandler handles incoming JSON-RPC notifications.
 type NotificationHandler func(method string, params interface{})
+
+// IncomingRequestHandler handles daemon-initiated Requests over a
+// bidirectional transport. Used by net.defer to dispatch to user-supplied
+// network handlers. Return (result, nil) to send a success response,
+// (nil, err) for an error, or (nil, nil) to send a method-not-found.
+type IncomingRequestHandler func(ctx context.Context, method string, params json.RawMessage) (interface{}, error)
 
 // ReplacedHandler handles session replaced events.
 type ReplacedHandler func()
@@ -22,6 +31,8 @@ type RpcTransport interface {
 	Notify(ctx context.Context, method string, params interface{}) error
 	// OnNotification registers a handler for incoming notifications.
 	OnNotification(handler NotificationHandler)
+	// OnRequest registers a handler for daemon-initiated Requests.
+	OnRequest(handler IncomingRequestHandler)
 	// OnReplaced registers a handler for session replaced events.
 	OnReplaced(handler ReplacedHandler)
 	// Close shuts down the transport connection.
@@ -53,6 +64,8 @@ func (t *stubTransport) Notify(_ context.Context, _ string, _ interface{}) error
 }
 
 func (t *stubTransport) OnNotification(_ NotificationHandler) {}
+
+func (t *stubTransport) OnRequest(_ IncomingRequestHandler) {}
 
 func (t *stubTransport) OnReplaced(_ ReplacedHandler) {}
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/byggflow/sandbox/internal/config"
 	"github.com/byggflow/sandbox/internal/identity"
+	"github.com/byggflow/sandbox/internal/netegress"
 	"github.com/byggflow/sandbox/internal/pool"
 	"github.com/byggflow/sandbox/internal/proxy"
 	"github.com/byggflow/sandbox/internal/runtime"
@@ -16,24 +17,25 @@ import (
 
 // Daemon is the main sandboxd service.
 type Daemon struct {
-	Config    config.Config
-	Runtimes  map[string]runtime.Runtime // keyed by runtime name ("docker", "docker+gvisor", "firecracker")
-	Pool      *pool.Manager
-	Registry  *Registry
+	Config           config.Config
+	Runtimes         map[string]runtime.Runtime // keyed by runtime name ("docker", "docker+gvisor", "firecracker")
+	Pool             *pool.Manager
+	Registry         *Registry
 	Templates        *TemplateRegistry
 	TemplateBackend  TemplateBackend            // Default template backend (Docker).
 	TemplateBackends map[string]TemplateBackend // Per-runtime template backends.
-	Server    *Server
-	Metrics   *Metrics
-	Events    *EventBus
-	Tunnels   *TunnelManager
-	verifier  atomic.Pointer[identity.Verifier] // Non-nil when multi-tenant mode is enabled.
-	AuthLimit   *rateLimiter                    // Rate limiter for failed auth attempts.
-	CreateLimit *rateLimiter                    // Rate limiter for sandbox creation per identity.
-	Log       *slog.Logger
+	Server           *Server
+	Metrics          *Metrics
+	Events           *EventBus
+	Tunnels          *TunnelManager
+	Egress           *netegress.Handler
+	verifier         atomic.Pointer[identity.Verifier] // Non-nil when multi-tenant mode is enabled.
+	AuthLimit        *rateLimiter                      // Rate limiter for failed auth attempts.
+	CreateLimit      *rateLimiter                      // Rate limiter for sandbox creation per identity.
+	Log              *slog.Logger
 
-	ctx       context.Context
-	cancel    context.CancelFunc
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // New creates a new Daemon instance.
@@ -88,13 +90,14 @@ func New(cfg config.Config, log *slog.Logger) (*Daemon, error) {
 		TemplateBackend:  &DockerTemplateBackend{Docker: dockerRT.Client},
 		TemplateBackends: templateBackends,
 		Metrics:          NewMetrics(),
-		Events:          NewEventBus(0),
-		Tunnels:         NewTunnelManager(cfg.Limits.TunnelBindAddress, cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
-		AuthLimit:       newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
-		CreateLimit:     newRateLimiter(cfg.Limits.CreateRateLimit, 1*time.Minute, cfg.Limits.RateLimitEntries),
-		Log:             log,
-		ctx:             ctx,
-		cancel:          cancel,
+		Events:           NewEventBus(0),
+		Tunnels:          NewTunnelManager(cfg.Limits.TunnelBindAddress, cfg.Limits.TunnelPortMin, cfg.Limits.TunnelPortMax, cfg.Limits.MaxConnectionsPerTunnel, log),
+		Egress:           netegress.New(),
+		AuthLimit:        newRateLimiter(10, 1*time.Minute, cfg.Limits.RateLimitEntries),
+		CreateLimit:      newRateLimiter(cfg.Limits.CreateRateLimit, 1*time.Minute, cfg.Limits.RateLimitEntries),
+		Log:              log,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	if cfg.MultiTenant.Enabled {
@@ -331,12 +334,19 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		ttl = d.Config.Limits.MaxTTL
 	}
 
-	// Generate ID and auth token.
+	// Generate ID, long-lived auth token, and single-use bootstrap nonce.
+	// The token stays on the daemon and is delivered to the agent over
+	// the first authenticated connection via auth.bootstrap; only the
+	// nonce ever appears in the container's environment / kernel cmdline.
 	sbxID, err := GenerateID(d.Config.Server.NodeID)
 	if err != nil {
 		return nil, err
 	}
 	authToken, err := GenerateAuthToken()
+	if err != nil {
+		return nil, err
+	}
+	authBootstrap, err := GenerateBootstrapNonce()
 	if err != nil {
 		return nil, err
 	}
@@ -357,32 +367,52 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	// Record creation frequency.
 	d.Pool.RecordCreation(image)
 
-	// Try to claim a warm container (only if not using a template image).
-	if templateID == "" {
+	// Try to claim a warm container (only if not using a template image
+	// and not opting out of network middleware — warm containers are
+	// pre-baked with HTTP_PROXY env, which is incompatible with
+	// NetworkMode=off; force a cold start in that case).
+	if templateID == "" && req.NetworkMode != "off" {
 		warm, ok := d.Pool.Claim(image)
 		if ok {
+			if warm.Agent != nil {
+				warm.Agent.Close()
+				warm.Agent = nil
+			}
 			sbx := &Sandbox{
-				ID:          sbxID,
-				ContainerID: warm.ContainerID,
-				Image:       image,
-				State:       StateRunning,
-				Identity:    id,
-				IdentityStr: id.Value,
-				AgentAddr:   warm.IP + ":9111",
-				AuthToken:   warm.AuthToken,
-				Created:     time.Now(),
-				TTL:         ttl,
-				Memory:      memory,
-				CPU:         cpu,
-				Profile:     profile,
-				Template:    templateID,
-				Labels:      req.Labels,
-				RuntimeName: runtimeName,
-				Buffer:      NewNotificationBuffer(),
+				ID:            sbxID,
+				ContainerID:   warm.ContainerID,
+				Image:         image,
+				State:         StateRunning,
+				Identity:      id,
+				IdentityStr:   id.Value,
+				AgentAddr:     warm.IP + ":9111",
+				AuthToken:     warm.AuthToken,
+				Created:       time.Now(),
+				TTL:           ttl,
+				Memory:        memory,
+				CPU:           cpu,
+				Profile:       profile,
+				Template:      templateID,
+				Labels:        req.Labels,
+				RuntimeName:   runtimeName,
+				EgressEnabled: true,
+				Buffer:        NewNotificationBuffer(),
 			}
 			if err := d.Registry.Add(sbx); err != nil {
+				d.cleanupClaimedWarm(ctx, rt, warm, "")
 				return nil, err
 			}
+			// Push the per-sandbox CA after claim. Warm-pool sandboxes
+			// don't go through rt.Create's readiness loop here, so
+			// Docker/Firecracker can't install this sandbox's CA for us.
+			if err := d.installCAOnWarm(ctx, sbx); err != nil {
+				// Roll the sandbox back rather than expose a broken
+				// network-middleware feature to the user.
+				_ = d.Registry.Remove(sbx.ID)
+				d.cleanupClaimedWarm(ctx, rt, warm, sbx.ID)
+				return nil, fmt.Errorf("installing ca on warm sandbox: %w", err)
+			}
+			d.registerSandboxCleanup(sbx)
 			d.Metrics.IncCreateWarm()
 			d.publishSandboxEvent("sandbox.created", sbx, map[string]interface{}{
 				"image":   image,
@@ -395,43 +425,84 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 		}
 	}
 
+	// Network middleware: opt-out per sandbox. "off" skips proxy env,
+	// CA generation, and the trust-bundle env vars entirely. Default is
+	// to wire everything up so rules can be installed later.
+	egressEnabled := d.Egress != nil && req.NetworkMode != "off"
+
+	// Eagerly generate the per-sandbox egress CA so its PEM can be passed
+	// to the runtime as an env var. The CA itself lives only on the daemon.
+	var caCertPEM string
+	if egressEnabled {
+		ca, err := d.Egress.EnsureCA(sbxID)
+		if err != nil {
+			return nil, fmt.Errorf("generate egress ca: %w", err)
+		}
+		caCertPEM = string(ca.CertPEM())
+	}
+
 	// Cold start: create a new instance via the runtime.
 	d.Log.Info("cold starting sandbox", "id", sbxID, "image", image, "runtime", runtimeName)
 	inst, err := rt.Create(ctx, runtime.CreateOpts{
-		Image:     image,
-		Memory:    memory,
-		CPU:       cpu,
-		Storage:   storage,
-		AuthToken: authToken,
-		Labels:    req.Labels,
-		Profile:   profile,
+		Image:         image,
+		Memory:        memory,
+		CPU:           cpu,
+		Storage:       storage,
+		AuthToken:     authToken,
+		AuthBootstrap: authBootstrap,
+		Labels:        req.Labels,
+		Profile:       profile,
+		CACertPEM:     caCertPEM,
+		EgressProxy:   egressEnabled,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create instance: %w", err)
+		// rt.Create failed AFTER we generated the per-sandbox CA. The
+		// sandbox will never be registered, so OnDestroy won't fire and
+		// the CA + private key would leak in caBySbx for the daemon's
+		// lifetime. Clean up here.
+		if egressEnabled {
+			d.Egress.ClearRules(sbxID)
+		}
+		return nil, fmt.Errorf("creating instance: %w", err)
 	}
 
 	sbx := &Sandbox{
-		ID:          sbxID,
-		ContainerID: inst.ID,
-		Image:       image,
-		State:       StateRunning,
-		Identity:    id,
-		IdentityStr: id.Value,
-		AgentAddr:   inst.AgentAddr,
-		AuthToken:   authToken,
-		Created:     time.Now(),
-		TTL:         ttl,
-		Memory:      memory,
-		CPU:         cpu,
-		Profile:     profile,
-		Template:    templateID,
-		Labels:      req.Labels,
-		RuntimeName: runtimeName,
-		Buffer:      NewNotificationBuffer(),
+		ID:            sbxID,
+		ContainerID:   inst.ID,
+		Image:         image,
+		State:         StateRunning,
+		Identity:      id,
+		IdentityStr:   id.Value,
+		AgentAddr:     inst.AgentAddr,
+		AuthToken:     authToken,
+		Created:       time.Now(),
+		TTL:           ttl,
+		Memory:        memory,
+		CPU:           cpu,
+		Profile:       profile,
+		Template:      templateID,
+		Labels:        req.Labels,
+		RuntimeName:   runtimeName,
+		EgressEnabled: egressEnabled,
+		Buffer:        NewNotificationBuffer(),
 	}
 	if err := d.Registry.Add(sbx); err != nil {
+		// Same hazard: rt.Create succeeded but Add failed (duplicate
+		// ID race, ~impossible in practice). Tear down the runtime
+		// instance AND the CA so nothing leaks. Use a detached
+		// context: the caller's ctx may already be cancelled (which
+		// is exactly the path that would cause Add to fail in the
+		// first place), and a cancelled rt.Destroy leaves the
+		// container + agent + ports running forever.
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = rt.Destroy(destroyCtx, inst.ID)
+		cancel()
+		if egressEnabled {
+			d.Egress.ClearRules(sbxID)
+		}
 		return nil, err
 	}
+	d.registerSandboxCleanup(sbx)
 
 	d.Metrics.IncCreateCold()
 	d.publishSandboxEvent("sandbox.created", sbx, map[string]interface{}{
@@ -442,6 +513,66 @@ func (d *Daemon) CreateSandbox(ctx context.Context, req CreateRequest, id identi
 	})
 	d.Log.Info("sandbox created (cold)", "id", sbxID, "container", inst.ID[:12])
 	return sbx, nil
+}
+
+// cleanupClaimedWarm tears down a warm container after Pool.Claim has
+// transferred ownership to CreateSandbox but before the sandbox is fully
+// registered. The pool no longer tracks the container at this point.
+func (d *Daemon) cleanupClaimedWarm(ctx context.Context, rt runtime.Runtime, warm *pool.WarmContainer, sandboxID string) {
+	if warm == nil {
+		return
+	}
+	if warm.Agent != nil {
+		warm.Agent.Close()
+		warm.Agent = nil
+	}
+	if sandboxID != "" && d.Egress != nil {
+		d.Egress.ClearRules(sandboxID)
+	}
+	if rt != nil {
+		// Detached context: this rollback path runs precisely when the
+		// caller's ctx may have been cancelled (e.g. the request
+		// timed out). Inheriting that cancellation skips Destroy and
+		// leaks the container + agent + ports.
+		destroyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := rt.Destroy(destroyCtx, warm.ContainerID); err != nil {
+			d.Log.Error("failed to destroy claimed warm container after rollback", "container", warm.ContainerID, "error", err)
+		}
+		cancel()
+	}
+}
+
+// registerSandboxCleanup wires per-sandbox subsystem cleanup into the
+// sandbox's OnDestroy fan-out. Any new per-sandbox state (egress rules,
+// CA cache, future things) belongs here so destroySandbox stays a one-line
+// fan-out instead of growing a list of hardcoded calls.
+func (d *Daemon) registerSandboxCleanup(sbx *Sandbox) {
+	if d.Egress != nil {
+		sbx.OnDestroy(func() { d.Egress.ClearRules(sbx.ID) })
+	}
+}
+
+// installCAOnWarm pushes the per-sandbox egress CA to a sandbox claimed
+// from the warm pool. The pool's rt.Create already passed; we just need
+// to deliver the CA over the existing authenticated channel before
+// reporting the sandbox as ready.
+func (d *Daemon) installCAOnWarm(_ context.Context, sbx *Sandbox) error {
+	if d.Egress == nil {
+		return nil
+	}
+	ca, err := d.Egress.EnsureCA(sbx.ID)
+	if err != nil {
+		return fmt.Errorf("generating egress ca: %w", err)
+	}
+	agent, err := d.ConnectAgent(sbx)
+	if err != nil {
+		return fmt.Errorf("connecting agent: %w", err)
+	}
+	defer agent.Close()
+	if err := agent.InstallCA(string(ca.CertPEM()), 5*time.Second); err != nil {
+		return fmt.Errorf("pushing ca: %w", err)
+	}
+	return nil
 }
 
 // DestroySandbox removes a sandbox and its container.
@@ -457,6 +588,7 @@ func (d *Daemon) destroySandbox(ctx context.Context, sbx *Sandbox) error {
 	}
 
 	d.Metrics.IncDestroy()
+	sbx.runDestroyCallbacks()
 	d.publishSandboxEvent("sandbox.destroyed", sbx, nil)
 
 	sbx.mu.Lock()
@@ -640,6 +772,15 @@ type CreateRequest struct {
 	Storage  string            `json:"storage"` // tmpfs size for /root (e.g. "500m", "1g"). Overrides profile default.
 	TTL      int               `json:"ttl"`
 	Labels   map[string]string `json:"labels"`
+	// NetworkMode controls whether the sandbox is wired through the
+	// daemon's egress proxy. Empty or "auto" (default) injects
+	// HTTP(S)_PROXY env vars, pushes the per-sandbox CA, and exports
+	// the trust-bundle env vars so middleware rules apply. "off" skips
+	// all of it: the sandbox dials upstreams directly, no rule
+	// evaluation happens for sandbox-process traffic, no CA is
+	// generated. SDK-mediated sbx.net.fetch() still works through the
+	// agent fallback, but rules don't apply to it either.
+	NetworkMode string `json:"network_mode,omitempty"`
 }
 
 // CreateTemplateRequest is the request body for POST /templates.

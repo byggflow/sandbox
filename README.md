@@ -390,6 +390,64 @@ Sandboxes can expose network ports to the outside through two mechanisms:
 
 Port tunneling is available in all SDKs via the `net` category and in the MCP server via the `sandbox_port_url`, `sandbox_expose_port`, `sandbox_close_port`, and `sandbox_list_ports` tools.
 
+## Network middleware
+
+Sandboxes can have their outbound HTTP traffic mediated by rules installed from the SDK. The rules run on the daemon, so credentials injected into requests never enter the sandbox.
+
+```ts
+const sbx = await createSandbox({
+  network: {
+    egress: [
+      // Inject the OpenAI key on the daemon side; the sandbox never sees it.
+      {
+        match: { host: "api.openai.com" },
+        action: "inject",
+        inject: { setHeaders: { Authorization: `Bearer ${process.env.OPENAI_KEY}` } },
+      },
+      // Block IMDS and metadata-style hosts.
+      { match: { host: "*.metadata.google.internal" }, action: "deny" },
+      // Allow github releases only on GET.
+      { match: { host: "api.github.com", method: "GET" }, action: "allow" },
+      // Defer to a programmatic handler — runs in your SDK process on
+      // each match, can mint per-request tokens, short-circuit with a
+      // synthetic response, or rewrite the upstream call.
+      {
+        id: "vault-auth",
+        match: { host: "api.acme.com" },
+        action: "defer",
+        handler: async (req) => {
+          const token = await mintTokenForRequest(req);
+          return {
+            request: { ...req, headers: { ...req.headers, Authorization: `Bearer ${token}` } },
+          };
+        },
+      },
+    ],
+  },
+});
+```
+
+Rules can also be added at runtime:
+
+```ts
+await sbx.network.inject("api.stripe.com", { Authorization: `Bearer ${stripeKey}` });
+await sbx.network.deny("*.evil.test");
+await sbx.network.defer("api.dynamic.com", async (req) => ({ request: req }));
+```
+
+How it works:
+
+- Each container starts with `HTTP_PROXY`/`HTTPS_PROXY` pointing at an in-sandbox proxy run by the agent.
+- The agent forwards each request to the daemon as an `OpNetEgress` RPC over the existing connection (bidirectional JSON-RPC).
+- The daemon evaluates the compiled rule set (exact-host map + suffix trie + regex tail), applies the matched `inject`/`allow`/`deny` action, then dials the upstream with a pooled HTTP transport.
+- The response streams back to the agent and out to the sandbox process.
+
+HTTPS is intercepted transparently. Each sandbox gets its own ECDSA P-256 certificate authority generated on the daemon. The CA cert is mounted into the container at `/tmp/sandbox-ca.crt` (and `/tmp/sandbox-ca-bundle.crt`), wired up via `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and `GIT_SSL_CAINFO`. On `CONNECT`, the agent asks the daemon for a short-lived leaf certificate for the requested SNI host (cached LRU), terminates TLS with the sandbox, decodes the HTTP, applies rules, and dials the real upstream itself. The CA private key never leaves the daemon; leaf keys are per-host with a 24-hour TTL.
+
+Match clauses support exact hosts (`"api.openai.com"`), suffix globs (`"*.github.com"`), and regex (`"/^[a-z]+\\.evil\\.test$/"`). The most-specific match wins; an exact host beats a wildcard suffix, and a deeper suffix beats a shallower one.
+
+**Enforcement model.** Egress rules apply to traffic that flows through the proxy — any HTTP client honoring `HTTP_PROXY` / `HTTPS_PROXY` (Node fetch, Python requests, Go net/http, curl, ...) routes through it automatically. Code that opens raw TCP sockets, ignores proxy env vars, or uses non-HTTP protocols bypasses the middleware entirely. Treat rules as cooperative unless you've separately constrained the sandbox's network namespace (e.g. iptables egress allowlist that REDIRECTs to the proxy). Network-level enforcement is a planned follow-up; today it's the operator's responsibility for untrusted-code scenarios that need a hard guarantee. Network middleware is also incompatible with `encrypted: true` (E2E hides RPC params from the daemon); the SDKs reject the combination at `createSandbox` time.
+
 ## CLI reference
 
 ### Sandbox lifecycle

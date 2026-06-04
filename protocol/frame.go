@@ -5,6 +5,21 @@ const (
 	FrameJSON   byte = 0x01 // JSON control message
 	FrameBinary byte = 0x02 // Raw binary data (file content, tar, stdin/stdout)
 	FramePing   byte = 0x03 // Ping/pong (payload: 0x00 = ping, 0x01 = pong)
+
+	// FrameStreamData carries a chunk of body bytes for a multiplexed
+	// stream. Payload: [4-byte big-endian streamID][raw bytes].
+	FrameStreamData byte = 0x04
+
+	// FrameStreamEnd signals the end of a stream. Payload:
+	// [4-byte streamID][1-byte status][optional error string].
+	// status 0 = clean close, status 1 = error (rest is UTF-8 message).
+	FrameStreamEnd byte = 0x05
+)
+
+// Stream end status codes carried in FrameStreamEnd payloads.
+const (
+	StreamEndOK    byte = 0x00
+	StreamEndError byte = 0x01
 )
 
 // Ping/pong payload values.

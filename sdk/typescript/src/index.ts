@@ -35,7 +35,23 @@ export type { ResolvedEndpoint } from "./sandbox.ts";
 export { templates } from "./template.ts";
 export { WsTransport } from "./transport.ts";
 export type { RpcTransport } from "./transport.ts";
-export type { Sandbox, SandboxOptions, ConnectOptions, ExecResult, OutputEvent, StreamExecHandle, TunnelInfo, StatResult } from "./sandbox.ts";
+export type {
+  Sandbox,
+  SandboxOptions,
+  ConnectOptions,
+  ExecResult,
+  OutputEvent,
+  StreamExecHandle,
+  TunnelInfo,
+  StatResult,
+  NetworkConfig,
+  NetworkRule,
+  NetworkMatch,
+  NetworkInject,
+  NetworkHandler,
+  DeferredRequest,
+  DeferredResponse,
+} from "./sandbox.ts";
 export type { TemplateManager } from "./template.ts";
 export type { Auth, RequestSignerAuth, SignatureAuthOptions } from "./auth.ts";
 export { signatureAuth } from "./auth.ts";

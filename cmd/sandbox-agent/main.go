@@ -34,7 +34,11 @@ func main() {
 			slog.Error("vsock listen failed", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("sandbox-agent starting", "transport", "vsock", "port", port)
+		// Transport-layer peer auth: only accept connections from the
+		// host kernel CID. An in-sandbox process that dials vsock
+		// loopback is rejected before any auth.token attempt.
+		ln = hostOnlyVsockListener(ln)
+		slog.Info("sandbox-agent starting", "transport", "vsock", "port", port, "peer_auth", "host-only")
 		if err := srv.Serve(ln); err != nil {
 			slog.Error("fatal error", "error", err)
 			os.Exit(1)
@@ -46,7 +50,11 @@ func main() {
 			slog.Error("tcp listen failed", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("sandbox-agent starting", "transport", "tcp", "addr", addr)
+		// Transport-layer peer auth: reject loopback. The daemon
+		// connects via the docker bridge gateway IP; in-container
+		// processes dialing 127.0.0.1 are not legitimate.
+		ln = nonLoopbackTCPListener(ln)
+		slog.Info("sandbox-agent starting", "transport", "tcp", "addr", addr, "peer_auth", "non-loopback")
 		if err := srv.Serve(ln); err != nil {
 			slog.Error("fatal error", "error", err)
 			os.Exit(1)

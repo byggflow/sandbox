@@ -102,10 +102,15 @@ func (r *DockerRuntime) Init(ctx context.Context) error {
 func (r *DockerRuntime) Create(ctx context.Context, opts CreateOpts) (*Instance, error) {
 	nanoCPUs := int64(opts.CPU * 1e9)
 
-	var envVars []string
-	if opts.AuthToken != "" {
-		envVars = append(envVars, "SANDBOX_AUTH_TOKEN="+opts.AuthToken)
+	egressPort := ""
+	if opts.EgressProxy {
+		egressPort = "8118"
 	}
+	envVars := containerEnv{
+		AuthBootstrap: opts.AuthBootstrap,
+		EgressPort:    egressPort,
+		CATrust:       opts.CACertPEM != "",
+	}.build()
 
 	labels := map[string]string{"sandboxd": "true"}
 	for k, v := range opts.Labels {
@@ -174,15 +179,40 @@ func (r *DockerRuntime) Create(ctx context.Context, opts CreateOpts) (*Instance,
 
 	agentAddr := ip + ":9111"
 
-	// Wait for agent to be reachable.
+	// Wait for agent to be reachable. The bootstrap call swaps the
+	// single-use nonce for the long-lived token; after this point the
+	// nonce is consumed agent-side and the daemon authenticates with
+	// the token on all subsequent connections.
+	// bootstrapped flips to true on the first successful auth.bootstrap
+	// call — the agent has consumed the nonce at that point, so any
+	// retry must use auth.token against the now-installed long-lived
+	// token rather than another bootstrap attempt (which would fail
+	// with "bootstrap unavailable" and brick the readiness loop).
+	bootstrapped := false
 	var lastErr error
 	for attempt := 0; attempt < 30; attempt++ {
 		agent, dialErr := proxy.Dial(agentAddr, 2*time.Second)
 		if dialErr == nil {
-			if opts.AuthToken != "" {
+			if opts.AuthBootstrap != "" && opts.AuthToken != "" && !bootstrapped {
+				if bootErr := agent.Bootstrap(opts.AuthBootstrap, opts.AuthToken, 2*time.Second); bootErr != nil {
+					agent.Close()
+					lastErr = bootErr
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				bootstrapped = true
+			} else if opts.AuthToken != "" {
 				if authErr := agent.Authenticate(opts.AuthToken, 2*time.Second); authErr != nil {
 					agent.Close()
 					lastErr = authErr
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+			}
+			if opts.CACertPEM != "" {
+				if caErr := agent.InstallCA(opts.CACertPEM, 5*time.Second); caErr != nil {
+					agent.Close()
+					lastErr = caErr
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}

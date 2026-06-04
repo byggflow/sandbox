@@ -179,6 +179,10 @@ func (t *encryptedTransport) OnNotification(handler NotificationHandler) {
 	})
 }
 
+func (t *encryptedTransport) OnRequest(handler IncomingRequestHandler) {
+	t.inner.OnRequest(handler)
+}
+
 func (t *encryptedTransport) OnReplaced(handler ReplacedHandler) {
 	t.inner.OnReplaced(handler)
 }

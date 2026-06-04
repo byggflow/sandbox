@@ -60,6 +60,9 @@ type wsTransport struct {
 	notifMu   sync.RWMutex
 	notifHandler NotificationHandler
 
+	requestMu      sync.RWMutex
+	requestHandler IncomingRequestHandler
+
 	replacedMu   sync.RWMutex
 	replacedHandler ReplacedHandler
 }
@@ -221,7 +224,15 @@ func (t *wsTransport) readLoop() {
 			continue
 		}
 
-		// Response (has ID).
+		// Daemon-initiated Request: has BOTH ID and Method. Dispatch to
+		// the registered request handler, write Response back. Used by
+		// net.defer to invoke programmatic handlers in the SDK.
+		if resp.ID != nil && resp.Method != "" {
+			go t.serveIncomingRequest(*resp.ID, resp.Method, resp.Params)
+			continue
+		}
+
+		// Response (has ID, no method).
 		if resp.ID != nil {
 			t.mu.Lock()
 			p, ok := t.pending[*resp.ID]
@@ -241,6 +252,53 @@ func (t *wsTransport) readLoop() {
 			}
 		}
 	}
+}
+
+// serveIncomingRequest dispatches a daemon-initiated Request to the
+// registered IncomingRequestHandler and writes the Response back.
+func (t *wsTransport) serveIncomingRequest(id int64, method string, params json.RawMessage) {
+	t.requestMu.RLock()
+	h := t.requestHandler
+	t.requestMu.RUnlock()
+
+	out := jsonRPCResponse{JSONRPC: "2.0", ID: &id}
+	if h == nil {
+		out.Error = &jsonRPCError{Code: -32601, Message: "method not found: " + method}
+	} else {
+		result, err := h(context.Background(), method, params)
+		switch {
+		case err != nil:
+			out.Error = &jsonRPCError{Code: -32000, Message: err.Error()}
+		case result != nil:
+			raw, mErr := json.Marshal(result)
+			if mErr != nil {
+				out.Error = &jsonRPCError{Code: -32000, Message: "marshal result: " + mErr.Error()}
+			} else {
+				out.Result = raw
+			}
+		default:
+			// Handler signaled "I don't serve this method" via the
+			// (nil, nil) sentinel (e.g. dispatchDefer for any
+			// method != net.defer). Returning a response with
+			// neither result nor error is invalid JSON-RPC 2.0; the
+			// peer's decoder will reject it. Emit a proper method-
+			// not-found error instead.
+			out.Error = &jsonRPCError{Code: -32601, Message: "method not found: " + method}
+		}
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return
+	}
+	_ = t.conn.Write(context.Background(), websocket.MessageText, data)
+}
+
+// OnRequest registers a handler for daemon-initiated Requests. There's a
+// single slot; the most recent registration wins.
+func (t *wsTransport) OnRequest(h IncomingRequestHandler) {
+	t.requestMu.Lock()
+	t.requestHandler = h
+	t.requestMu.Unlock()
 }
 
 // Call sends a JSON-RPC request and waits for the response.

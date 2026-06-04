@@ -144,10 +144,18 @@ func (r *FirecrackerRuntime) Create(ctx context.Context, opts CreateOpts) (*Inst
 		vcpus = 1
 	}
 
-	// Build boot args.
+	// Build boot args. Egress proxy hints are surfaced here so the in-VM
+	// init script can export HTTP_PROXY/HTTPS_PROXY for the agent and user
+	// processes (mirroring the Docker code path). The CA PEM is too large
+	// for kernel boot args; injecting it on Firecracker is a separate
+	// follow-up.
+	egressPort := ""
+	if opts.EgressProxy {
+		egressPort = "8118"
+	}
 	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off init=/init"
-	if opts.AuthToken != "" {
-		bootArgs += " sandbox.auth_token=" + opts.AuthToken
+	if extra := (containerEnv{AuthBootstrap: opts.AuthBootstrap, EgressPort: egressPort}).kernelArgs(); extra != "" {
+		bootArgs += " " + extra
 	}
 
 	// Write Firecracker config.
@@ -219,16 +227,38 @@ func (r *FirecrackerRuntime) Create(ctx context.Context, opts CreateOpts) (*Inst
 	r.cidToID[cid] = vmID
 	r.mu.Unlock()
 
-	// Wait for agent to become reachable via vsock.
+	// Wait for agent to become reachable via vsock. Bootstrap trades
+	// the single-use nonce (delivered via kernel cmdline) for the
+	// long-lived token, which the agent stores in process memory only.
+	// After the first successful Bootstrap, retries MUST switch to
+	// auth.token — the nonce is consumed and another bootstrap would
+	// fail with "bootstrap unavailable", bricking the readiness loop.
+	bootstrapped := false
 	var lastErr error
 	for attempt := 0; attempt < 30; attempt++ {
 		conn, dialErr := r.dialVsock(cid, 9111, 2*time.Second)
 		if dialErr == nil {
 			agent := proxy.Wrap(conn)
-			if opts.AuthToken != "" {
+			if opts.AuthBootstrap != "" && opts.AuthToken != "" && !bootstrapped {
+				if bootErr := agent.Bootstrap(opts.AuthBootstrap, opts.AuthToken, 2*time.Second); bootErr != nil {
+					agent.Close()
+					lastErr = bootErr
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				bootstrapped = true
+			} else if opts.AuthToken != "" {
 				if authErr := agent.Authenticate(opts.AuthToken, 2*time.Second); authErr != nil {
 					agent.Close()
 					lastErr = authErr
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+			}
+			if opts.CACertPEM != "" {
+				if caErr := agent.InstallCA(opts.CACertPEM, 5*time.Second); caErr != nil {
+					agent.Close()
+					lastErr = caErr
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}

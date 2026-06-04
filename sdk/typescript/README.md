@@ -70,6 +70,42 @@ const ports = await sbx.net.ports();
 await sbx.net.close(8080);
 ```
 
+## Network middleware
+
+Inject credentials, allow, or deny outbound HTTP requests with rules evaluated on the daemon. Credentials injected via `setHeaders` never enter the sandbox process memory.
+
+```ts
+const sbx = await createSandbox({
+  network: {
+    egress: [
+      {
+        match: { host: "api.openai.com" },
+        action: "inject",
+        inject: { setHeaders: { Authorization: `Bearer ${process.env.OPENAI_KEY}` } },
+      },
+      { match: { host: "*.metadata.google.internal" }, action: "deny" },
+    ],
+  },
+});
+
+// or at runtime:
+await sbx.network.inject("api.stripe.com", { Authorization: `Bearer ${stripeKey}` });
+await sbx.network.deny("*.evil.test");
+
+// programmatic handler — runs in your SDK process, can mint per-request
+// tokens or return a synthetic response:
+await sbx.network.defer("api.dynamic.com", async (req) => {
+  const token = await mintToken({ url: req.url });
+  return { request: { ...req, headers: { ...req.headers, Authorization: `Bearer ${token}` } } };
+});
+```
+
+Match clauses accept exact hosts, suffix globs (`"*.github.com"`), or regex (`"/^[a-z]+\\.evil\\.test$/"`). The most-specific match wins.
+
+HTTPS is intercepted transparently via a per-sandbox CA that the daemon mints. Leaf certs are signed on demand for each SNI host and cached. The CA private key never leaves the daemon; injected credentials never enter the sandbox.
+
+**Enforcement is cooperative.** Rules apply to HTTP clients that honor `HTTP_PROXY` / `HTTPS_PROXY` (Node fetch, Python requests, Go net/http, curl, ...). Code that opens raw TCP sockets or ignores proxy env vars bypasses the middleware. For untrusted-code scenarios that need a hard guarantee, run the sandbox inside an egress-restricted network namespace. Network middleware is also incompatible with `encrypted: true` — E2E encryption hides RPC params from the daemon, so rules can't be evaluated; `createSandbox` rejects the combination.
+
 ## Connect to an existing sandbox
 
 ```ts

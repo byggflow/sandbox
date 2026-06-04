@@ -1,14 +1,32 @@
+// Package net is the agent-side fallback for OpNetFetch when the
+// daemon cannot serve the request itself. It exists only to support
+// E2E-encrypted sessions where the SDK encrypts params with a key the
+// daemon doesn't have — the daemon's clientLocalMethodsFor refuses to
+// claim those, so the frame forwards to the agent which decrypts via
+// its E2E session and dispatches here.
+//
+// Encrypted sessions therefore do NOT get rule application (the
+// daemon never sees the URL or headers). Network middleware and
+// encrypted=true are mutually exclusive at the SDK boundary; this
+// handler exists to keep sbx.net.fetch working for encrypted
+// sandboxes that don't install rules.
+//
+// For plaintext sessions, OpNetFetch is claimed by the daemon and
+// flows through internal/netegress/egress.go — that path applies
+// rules, follows redirects (legacy net.fetch behavior), and uses the
+// SSRF-hardened dialer with a single private-IP guard.
 package net
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/byggflow/sandbox/protocol"
 )
 
 // FetchParams is the params for net.fetch.
@@ -26,7 +44,6 @@ type FetchResult struct {
 	Body    string            `json:"body"`
 }
 
-// maxResponseBody is the maximum response body size (10 MB).
 const maxResponseBody = 10 * 1024 * 1024
 
 var httpClient = &http.Client{
@@ -42,48 +59,23 @@ var httpClient = &http.Client{
 	},
 }
 
-// validateFetchURL blocks requests to private/internal networks and non-HTTP schemes.
+// validateFetchURL blocks requests to private/internal networks and
+// non-HTTP schemes. Uses the consolidated protocol.IsPrivateHost so
+// the agent and daemon never drift on what counts as "private".
 func validateFetchURL(u *url.URL) error {
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("unsupported scheme %q: only http and https are allowed", u.Scheme)
 	}
-
-	host := u.Hostname()
-
-	ip := net.ParseIP(host)
-	if ip != nil {
-		if isPrivateIP(ip) {
-			return fmt.Errorf("requests to private/internal addresses are not allowed")
-		}
+	if protocol.IsPrivateHost(u.Hostname()) {
+		return fmt.Errorf("requests to private/internal addresses are not allowed")
 	}
-
 	return nil
 }
 
-func isPrivateIP(ip net.IP) bool {
-	privateRanges := []struct {
-		network string
-	}{
-		{"10.0.0.0/8"},
-		{"172.16.0.0/12"},
-		{"192.168.0.0/16"},
-		{"127.0.0.0/8"},
-		{"169.254.0.0/16"}, // link-local, includes cloud metadata
-		{"::1/128"},
-		{"fc00::/7"},
-		{"fe80::/10"},
-	}
-	for _, r := range privateRanges {
-		_, cidr, _ := net.ParseCIDR(r.network)
-		if cidr.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// Fetch performs an HTTP request and returns the response.
+// Fetch performs an HTTP request and returns the response. Used only
+// from the encrypted-session passthrough; the daemon handles all
+// plaintext fetches through netegress.
 func Fetch(raw json.RawMessage) (interface{}, error) {
 	var p FetchParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -113,7 +105,7 @@ func Fetch(raw json.RawMessage) (interface{}, error) {
 
 	req, err := http.NewRequest(method, p.URL, bodyReader)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
 	for k, v := range p.Headers {
@@ -128,7 +120,7 @@ func Fetch(raw json.RawMessage) (interface{}, error) {
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
+		return nil, fmt.Errorf("reading response body: %w", err)
 	}
 
 	headers := make(map[string]string)

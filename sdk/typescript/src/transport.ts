@@ -1,5 +1,9 @@
 import { ConnectionError, RpcError, SessionReplacedError } from "./errors.ts";
 
+/** Handler for daemon-initiated requests. Return the JSON-RPC result, or
+ * throw to send back an error. */
+export type IncomingRequestHandler = (method: string, params: unknown) => Promise<unknown> | unknown;
+
 /** Transport layer for JSON-RPC communication with the sandbox agent. */
 export interface RpcTransport {
   call(method: string, params: unknown): Promise<unknown>;
@@ -9,6 +13,10 @@ export interface RpcTransport {
   callExpectBinary(method: string, params: unknown): Promise<{ result: unknown; binary: Uint8Array[] }>;
   notify(method: string, params: unknown): void;
   onNotification(handler: (method: string, params: unknown) => void): void;
+  /** Register a handler for daemon-initiated Requests (bidirectional RPC).
+   * The first registered handler that returns non-undefined wins; others
+   * are skipped. Used by sbx.network.intercept to serve net.defer. */
+  onRequest(handler: IncomingRequestHandler): void;
   onReplaced(handler: () => void): void;
   close(): Promise<void>;
   sendBinary(data: Uint8Array): void;
@@ -32,6 +40,7 @@ export class WsTransport implements RpcTransport {
   private nextId = 1;
   private pending = new Map<number, PendingRequest>();
   private notificationHandlers: Array<(method: string, params: unknown) => void> = [];
+  private requestHandlers: Array<IncomingRequestHandler> = [];
   private replacedHandlers: Array<() => void> = [];
   private binaryHandler: ((data: Uint8Array) => void) | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -109,7 +118,15 @@ export class WsTransport implements RpcTransport {
         return;
       }
 
-      // JSON-RPC response (has id).
+      // Daemon-initiated Request: has BOTH id and method. Dispatch to
+      // registered request handlers (e.g. net.defer routed to user
+      // handlers via sbx.network.intercept).
+      if (msg.id !== undefined && msg.method) {
+        this.handleIncomingRequest(msg.id, msg.method, msg.params);
+        return;
+      }
+
+      // JSON-RPC response (has id, no method).
       if (msg.id !== undefined) {
         const p = this.pending.get(msg.id);
         if (!p) return;
@@ -141,6 +158,28 @@ export class WsTransport implements RpcTransport {
         }
       }
     };
+  }
+
+  private async handleIncomingRequest(id: number, method: string, params: unknown): Promise<void> {
+    for (const handler of this.requestHandlers) {
+      try {
+        const result = await handler(method, params);
+        if (result !== undefined) {
+          this.ws?.send(JSON.stringify({ jsonrpc: "2.0", id, result }));
+          return;
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.ws?.send(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }));
+        return;
+      }
+    }
+    // No handler matched. Return a method-not-found error.
+    this.ws?.send(JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32601, message: `method not found: ${method}` },
+    }));
   }
 
   call(method: string, params: unknown): Promise<unknown> {
@@ -208,6 +247,10 @@ export class WsTransport implements RpcTransport {
 
   onNotification(handler: (method: string, params: unknown) => void): void {
     this.notificationHandlers.push(handler);
+  }
+
+  onRequest(handler: IncomingRequestHandler): void {
+    this.requestHandlers.push(handler);
   }
 
   onReplaced(handler: () => void): void {

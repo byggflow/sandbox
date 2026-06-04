@@ -116,6 +116,20 @@ class EncryptedTransport implements RpcTransport {
     });
   }
 
+  onRequest(handler: (method: string, params: unknown) => Promise<unknown> | unknown): void {
+    this.inner.onRequest(async (method, params) => {
+      let decryptedParams: unknown = params;
+      try {
+        decryptedParams = await this.decryptResult(params);
+      } catch {
+        // Not encrypted; pass through.
+      }
+      const result = await handler(method, decryptedParams);
+      if (result === undefined) return undefined;
+      return this.encryptParams(result);
+    });
+  }
+
   onReplaced(handler: () => void): void {
     this.inner.onReplaced(handler);
   }
